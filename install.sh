@@ -44,6 +44,30 @@ require_cmd() {
   command -v "$1" &>/dev/null || die "Required command not found: $1 — install it first"
 }
 
+install_deps() {
+  local pkgs=()
+  command -v curl    &>/dev/null || pkgs+=(curl)
+  command -v python3 &>/dev/null || pkgs+=(python3)
+  command -v iptables &>/dev/null || pkgs+=(iptables)
+  command -v ip6tables &>/dev/null || pkgs+=(ip6tables)
+
+  if [[ ${#pkgs[@]} -eq 0 ]]; then
+    ok "All dependencies already installed"
+    return 0
+  fi
+
+  info "Installing missing dependencies: ${pkgs[*]}"
+  if command -v apt-get &>/dev/null; then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}"
+  elif command -v yum &>/dev/null; then
+    yum install -y "${pkgs[@]}"
+  else
+    die "Cannot install dependencies automatically — please install manually: ${pkgs[*]}"
+  fi
+  ok "Dependencies installed"
+}
+
 # detect real user when called via sudo
 real_user() {
   echo "${SUDO_USER:-${USER:-$(whoami)}}"
@@ -95,31 +119,58 @@ detect_libc() {
 }
 
 # ─── config management ────────────────────────────────────────────────────────
-config_file()  { echo "${INSTALL_DIR}/current-config.json"; }
+data_dir()     { echo "${INSTALL_DIR}/data"; }
+config_file()  { echo "${INSTALL_DIR}/data/current-config.json"; }
 fixed_config() { echo "${INSTALL_DIR}/current-config.fixed.json"; }
 sub_url_file() { echo "${INSTALL_DIR}/subscription.url"; }
 log_file()     { echo "${INSTALL_DIR}/hiddify-core.log"; }
+
+setup_dirs() {
+  mkdir -p "${INSTALL_DIR}" "$(data_dir)"
+  # hiddify-svc needs write access to data/ (writes current-config.json, db, geo files)
+  chown root:"$HIDDIFY_USER" "${INSTALL_DIR}"
+  chmod 750 "${INSTALL_DIR}"
+  chown "$HIDDIFY_USER":"$HIDDIFY_USER" "$(data_dir)"
+  chmod 770 "$(data_dir)"
+  mkdir -p "${INSTALL_DIR}/data/webui"
+  chown -R "$HIDDIFY_USER":"$HIDDIFY_USER" "$(data_dir)"
+  chmod -R 770 "$(data_dir)"
+  # log: root-owned but group-readable so both root and hiddify-svc can write
+  touch "$(log_file)"
+  chown root:"$HIDDIFY_USER" "$(log_file)"
+  chmod 664 "$(log_file)"
+}
 
 # Generate config from subscription URL using hiddify-core run
 # hiddify-core run -c URL generates current-config.json then exits/crashes —
 # we catch that, then patch the generated file
 generate_config() {
   local url="$1"
-  local raw_config="${INSTALL_DIR}/current-config.json"
+  local raw_config
+  raw_config="$(config_file)"
 
   info "Generating config from subscription..."
 
+  # hiddify-core run writes current-config.json into CWD/data/
+  # so we cd into INSTALL_DIR where data/ lives
   # Run with timeout — it will generate the config then likely fail on balancer
   # We only need the file, not a successful exit
-  cd "$INSTALL_DIR"
-  sudo -u "$HIDDIFY_USER" timeout 15 \
-    "$INSTALL_DIR/$BINARY_NAME" run -c "$url" \
-    >> "$(log_file)" 2>&1 || true
+  (cd "$INSTALL_DIR" && \
+    sudo -u "$HIDDIFY_USER" timeout 20 \
+      "$INSTALL_DIR/$BINARY_NAME" run -c "$url" \
+      >> "$(log_file)" 2>&1) || true
 
-  [[ -f "$raw_config" ]] || die "Config generation failed — no current-config.json produced. Check $(log_file)"
+  if [[ ! -f "$raw_config" ]]; then
+    echo ""
+    warn "Last 20 lines of log:"
+    tail -n 20 "$(log_file)" 2>/dev/null || true
+    die "Config generation failed — no current-config.json in $(data_dir). See log above."
+  fi
 
   info "Patching config (fixing balancer bug)..."
   patch_config "$raw_config" "$(fixed_config)"
+  chown root:"$HIDDIFY_USER" "$(fixed_config)"
+  chmod 640 "$(fixed_config)"
   ok "Config ready: $(fixed_config)"
 }
 
@@ -345,29 +396,51 @@ iptables_save() {
   fi
 }
 
-# ─── systemd ──────────────────────────────────────────────────────────────────
+# ─── systemd ────────────────────────────────────────────────────────────────────────────
 write_service() {
-  cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
+  # iptables runs as root — separate oneshot service
+  cat > "/etc/systemd/system/${SERVICE_NAME}-iptables.service" <<'UNIT'
+[Unit]
+Description=Hiddify iptables rules
+Before=SVCNAME.service
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=INSTALLDIR/hcore-iptables.sh add
+ExecStop=INSTALLDIR/hcore-iptables.sh del
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  # substitute real paths (UNIT heredoc is single-quoted so no expansion)
+  sed -i "s|SVCNAME|${SERVICE_NAME}|g; s|INSTALLDIR|${INSTALL_DIR}|g" \
+    "/etc/systemd/system/${SERVICE_NAME}-iptables.service"
+
+  cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<'UNIT'
 [Unit]
 Description=Hiddify Core Transparent Proxy
-After=network-online.target
+After=network-online.target SVCNAME-iptables.service
 Wants=network-online.target
+Requires=SVCNAME-iptables.service
 
 [Service]
 Type=simple
-User=${HIDDIFY_USER}
-WorkingDirectory=${INSTALL_DIR}
-ExecStart=${INSTALL_DIR}/${BINARY_NAME} srun -c ${INSTALL_DIR}/current-config.fixed.json
-ExecStartPost=${INSTALL_DIR}/hcore-iptables.sh add
-ExecStop=${INSTALL_DIR}/hcore-iptables.sh del
+User=HIDDIFYUSER
+WorkingDirectory=INSTALLDIR/data
+ExecStart=INSTALLDIR/BINNAME srun -c INSTALLDIR/current-config.fixed.json
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
-EOF
-  ok "systemd unit written: /etc/systemd/system/${SERVICE_NAME}.service"
+UNIT
+  sed -i "s|SVCNAME|${SERVICE_NAME}|g; s|INSTALLDIR|${INSTALL_DIR}|g; s|HIDDIFYUSER|${HIDDIFY_USER}|g; s|BINNAME|${BINARY_NAME}|g" \
+    "/etc/systemd/system/${SERVICE_NAME}.service"
+
+  ok "systemd units written"
 }
 
 # separate script for iptables called from systemd ExecStartPost/ExecStop
@@ -469,6 +542,9 @@ cmd_install() {
 
   [[ -n "$SUBSCRIPTION_URL" ]] || die "Required: --subscription-url <URL>"
 
+  section "Installing dependencies"
+  install_deps
+
   section "Pre-flight checks"
   require_cmd curl
   require_cmd python3
@@ -487,19 +563,13 @@ cmd_install() {
   info "Install   : $INSTALL_DIR"
 
   section "Creating directories and user"
-  mkdir -p "$INSTALL_DIR"
-
   if ! id "$HIDDIFY_USER" &>/dev/null; then
     useradd -r -s /usr/sbin/nologin -M -d "$INSTALL_DIR" "$HIDDIFY_USER"
     ok "User created: $HIDDIFY_USER"
   else
     ok "User already exists: $HIDDIFY_USER"
   fi
-
-  chown root:"$HIDDIFY_USER" "$INSTALL_DIR"
-  chmod 750 "$INSTALL_DIR"
-  touch "$(log_file)"
-  chown "$HIDDIFY_USER":"$HIDDIFY_USER" "$(log_file)"
+  setup_dirs
 
   section "Downloading hiddify-core"
   local version
@@ -513,9 +583,9 @@ cmd_install() {
 
   section "Generating and patching config"
   echo "$SUBSCRIPTION_URL" > "$(sub_url_file)"
-  chown "$HIDDIFY_USER":"$HIDDIFY_USER" "$(sub_url_file)"
+  chown root:"$HIDDIFY_USER" "$(sub_url_file)"
+  chmod 640 "$(sub_url_file)"
   generate_config "$SUBSCRIPTION_URL"
-  chown "$HIDDIFY_USER":"$HIDDIFY_USER" "$(fixed_config)" "$(config_file)" 2>/dev/null || true
 
   section "Installing iptables-persistent"
   if ! command -v netfilter-persistent &>/dev/null; then
@@ -530,7 +600,9 @@ cmd_install() {
 
   section "Starting service"
   systemctl daemon-reload
+  systemctl enable "${SERVICE_NAME}-iptables"
   systemctl enable "$SERVICE_NAME"
+  systemctl restart "${SERVICE_NAME}-iptables"
   systemctl restart "$SERVICE_NAME"
   sleep 2
   systemctl is-active --quiet "$SERVICE_NAME" \
@@ -568,7 +640,6 @@ cmd_update() {
   section "Re-generating config"
   rm -f "$(config_file)" 2>/dev/null || true
   generate_config "$url"
-  chown "$HIDDIFY_USER":"$HIDDIFY_USER" "$(fixed_config)" "$(config_file)" 2>/dev/null || true
 
   section "Restarting service"
   systemctl start "$SERVICE_NAME"
@@ -605,7 +676,8 @@ cmd_upgrade() {
   section "Re-patching config (API may have changed)"
   if [[ -f "$(config_file)" ]]; then
     patch_config "$(config_file)" "$(fixed_config)"
-    chown "$HIDDIFY_USER":"$HIDDIFY_USER" "$(fixed_config)" 2>/dev/null || true
+    chown root:"$HIDDIFY_USER" "$(fixed_config)"
+    chmod 640 "$(fixed_config)"
   fi
 
   section "Restarting service"
@@ -625,9 +697,12 @@ cmd_uninstall() {
   [[ "$confirm" =~ ^[Yy]$ ]] || { info "Aborted."; exit 0; }
 
   section "Stopping and disabling service"
-  systemctl stop "$SERVICE_NAME"    2>/dev/null || true
-  systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+  systemctl stop "$SERVICE_NAME"               2>/dev/null || true
+  systemctl stop "${SERVICE_NAME}-iptables"    2>/dev/null || true
+  systemctl disable "$SERVICE_NAME"            2>/dev/null || true
+  systemctl disable "${SERVICE_NAME}-iptables" 2>/dev/null || true
   rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+  rm -f "/etc/systemd/system/${SERVICE_NAME}-iptables.service"
   systemctl daemon-reload
 
   section "Removing iptables rules"

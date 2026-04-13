@@ -30,7 +30,7 @@ Bash-скрипт для автоматической установки [hiddif
 
 ```bash
 # Скачать скрипт
-curl -fsSL https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/sqesh57-commits/hcore/main/install.sh -o install.sh
 chmod +x install.sh
 
 # Установить

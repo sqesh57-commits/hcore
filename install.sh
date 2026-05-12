@@ -663,6 +663,16 @@ cmd_install() {
   info "Arch      : $(detect_arch) / libc: $(detect_libc)"
   info "Install   : $INSTALL_DIR"
 
+  section "Pre-install recovery"
+  if systemctl is-active --quiet "${SERVICE_NAME}-iptables" && ! systemctl is-active --quiet "$SERVICE_NAME"; then
+    warn "Detected partial install state: iptables active while service inactive"
+    warn "Cleaning stale transparent proxy state before reinstall"
+    systemctl stop "${SERVICE_NAME}-iptables" 2>/dev/null || true
+    iptables_del
+    iptables_save
+  fi
+  systemctl daemon-reload 2>/dev/null || true
+
   section "Creating directories and user"
   if ! id "$HIDDIFY_USER" &>/dev/null; then
     useradd -r -s /usr/sbin/nologin -M -d "$INSTALL_DIR" "$HIDDIFY_USER"

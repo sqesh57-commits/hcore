@@ -271,6 +271,40 @@ get_latest_version() {
     || die "Failed to fetch latest version from GitHub API"
 }
 
+download_file() {
+  local url="$1"
+  local dst="$2"
+  local part="${dst}.part"
+
+  info "Downloading $(basename "$dst")..."
+
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --location --show-error --progress-bar \
+      --connect-timeout 20 \
+      --max-time 900 \
+      --retry 8 \
+      --retry-delay 5 \
+      --retry-max-time 900 \
+      --retry-all-errors \
+      -C - \
+      "$url" \
+      -o "$part" \
+      || die "Download failed: $url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget --tries=8 \
+      --timeout=30 \
+      --continue \
+      -O "$part" \
+      "$url" \
+      || die "Download failed: $url"
+  else
+    die "Neither curl nor wget found"
+  fi
+
+  [[ -s "$part" ]] || die "Downloaded file is empty: $part"
+  mv -f "$part" "$dst"
+}
+
 download_binary() {
   local version="$1"
   local arch
@@ -284,8 +318,7 @@ download_binary() {
   tmp=$(mktemp -d)
 
   info "Downloading ${asset} (${version})..."
-  curl -fsSL --progress-bar "$url" -o "${tmp}/${asset}" \
-    || die "Download failed: $url"
+  download_file "$url" "${tmp}/${asset}"
 
   info "Extracting..."
   mkdir -p "${tmp}/extracted"

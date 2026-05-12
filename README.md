@@ -42,6 +42,8 @@ sudo ./install.sh install --subscription-url "https://your-subscription-url/..."
 
 ```bash
 sudo ./install.sh test
+# или через установленный wrapper
+sudo hcore test
 ```
 
 Ожидаемый результат — все три строки показывают IP вашего прокси-сервера, а не реальный IP машины:
@@ -82,11 +84,13 @@ sudo ./install.sh upgrade
 
 ```bash
 sudo ./install.sh status
+sudo hcore status
 ```
 Показывает состояние сервиса, порты, правила iptables и текущий внешний IP.
 
 ```bash
 sudo ./install.sh test
+sudo hcore test
 ```
 Проверяет что трафик идёт через прокси тремя способами: через env, через iptables redirect, от пользователя nobody.
 
@@ -108,6 +112,7 @@ sudo ./install.sh uninstall
 
 ```
 /opt/hiddify/
+├── hcore                     # установленная копия CLI-скрипта
 ├── hiddify-core              # бинарь
 ├── current-config.json       # конфиг сгенерированный из подписки
 ├── current-config.fixed.json # пропатченный конфиг (используется при запуске)
@@ -116,6 +121,7 @@ sudo ./install.sh uninstall
 ├── hiddify-core.log          # лог
 └── version.txt               # текущая версия бинаря
 
+/usr/local/sbin/hcore              # operational wrapper
 /etc/systemd/system/hiddify.service
 /etc/profile.d/hiddify-proxy.sh   # http_proxy env для новых сессий
 ```
@@ -169,8 +175,8 @@ systemctl status hiddify --no-pager
 systemctl status hiddify-iptables --no-pager
 ss -ltnup | grep -E '12334|12336|12337'
 iptables -t nat -S
-sudo ./install.sh status
-sudo ./install.sh test
+sudo hcore status
+sudo hcore test
 curl --noproxy '*' -4 https://ifconfig.me
 curl https://ifconfig.me
 ```

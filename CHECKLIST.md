@@ -61,9 +61,9 @@
 
 ## Phase 5. Installed CLI
 
-- [ ] Устанавливать CLI-команду `/usr/local/sbin/hcore`
-- [ ] Обновить README под использование `hcore status/update/upgrade/test/uninstall`
-- [ ] Проверить, что после установки команды работают без исходного `install.sh` из домашней директории
+- [x] Устанавливать CLI-команду `/usr/local/sbin/hcore`
+- [x] Обновить README под использование `hcore status/update/upgrade/test/uninstall`
+- [x] Проверить, что после установки команды работают без исходного `install.sh` из домашней директории
 
 ## Phase 6. Hardening and ergonomics
 

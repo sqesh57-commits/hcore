@@ -579,6 +579,22 @@ proxy_direct_off() {
   systemctl start "$SERVICE_NAME" 2>/dev/null || true
 }
 
+# ─── CLI install helpers ─────────────────────────────────────────────────────
+install_cli() {
+  local source_script wrapper_path
+  source_script=$(readlink -f "$0" 2>/dev/null || echo "$0")
+  wrapper_path="/usr/local/sbin/hcore"
+
+  install -d /usr/local/sbin
+  install -m 755 "$source_script" "${INSTALL_DIR}/hcore"
+
+  cat > "$wrapper_path" <<EOF
+#!/usr/bin/env bash
+exec "${INSTALL_DIR}/hcore" "\$@"
+EOF
+  chmod 755 "$wrapper_path"
+}
+
 # ─── commands ─────────────────────────────────────────────────────────────────
 cmd_install() {
   require_root
@@ -650,6 +666,9 @@ cmd_install() {
   write_service
   write_env_profile
 
+  section "Installing CLI"
+  install_cli
+
   section "Starting service"
   systemctl daemon-reload
   systemctl enable "${SERVICE_NAME}-iptables"
@@ -674,8 +693,9 @@ cmd_install() {
   echo -e "  Install dir : ${CYAN}${INSTALL_DIR}${NC}"
   echo -e "  Service     : ${CYAN}systemctl status ${SERVICE_NAME}${NC}"
   echo -e "  Logs        : ${CYAN}journalctl -u ${SERVICE_NAME} -f${NC}"
-  echo -e "  Update sub  : ${CYAN}sudo $0 update${NC}"
-  echo -e "  Upgrade bin : ${CYAN}sudo $0 upgrade${NC}"
+  echo -e "  CLI         : ${CYAN}sudo hcore status${NC}"
+  echo -e "  Update sub  : ${CYAN}sudo hcore update${NC}"
+  echo -e "  Upgrade bin : ${CYAN}sudo hcore upgrade${NC}"
 }
 
 cmd_update() {
@@ -762,7 +782,9 @@ cmd_uninstall() {
   iptables_save
 
   section "Removing files"
+  rm -f /usr/local/sbin/hcore
   rm -f "${INSTALL_DIR}/hcore-iptables.sh"
+  rm -f "${INSTALL_DIR}/hcore"
   rm -rf "$INSTALL_DIR"
   rm -f /etc/profile.d/hiddify-proxy.sh
 
@@ -841,6 +863,8 @@ ${BOLD}hiddify-core transparent proxy installer${NC}
 
 Usage: sudo $0 <command> [options]
 
+After install, operational commands are also available via: sudo hcore <command>
+
 Commands:
   install --subscription-url <URL> [--install-dir <DIR>]
                     Full install: download binary, generate config,
@@ -860,6 +884,8 @@ Examples:
   sudo $0 update
   sudo $0 upgrade
   sudo $0 status
+  sudo hcore test
+  sudo hcore uninstall
 
 EOF
 }

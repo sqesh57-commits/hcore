@@ -86,13 +86,13 @@ sudo ./install.sh upgrade
 sudo ./install.sh status
 sudo hcore status
 ```
-Показывает состояние сервиса, порты, правила iptables и текущий внешний IP.
+Показывает summary по runtime state, состояние сервиса, порты, правила iptables и текущий внешний IP.
 
 ```bash
 sudo ./install.sh test
 sudo hcore test
 ```
-Проверяет что трафик идёт через прокси тремя способами: через env, через iptables redirect, от пользователя nobody.
+Проверяет что трафик идёт через прокси тремя способами: через env, через iptables redirect, от пользователя nobody, и дополнительно делает sanity checks по service state, listening redirect port и наличию OUTPUT → HIDDIFY.
 
 ```bash
 sudo ./install.sh uninstall
@@ -186,6 +186,8 @@ curl https://ifconfig.me
 Ожидаемый результат для шага с `update`/`upgrade`: перед сетевыми операциями скрипт временно выходит в direct mode, затем возвращает transparent proxy и проходит `test`.
 
 Для `update` и `upgrade` скрипт также сохраняет runtime backup в `${INSTALL_DIR}/backup`. Если новый конфиг или запуск сервиса ломаются, скрипт откатывает runtime state и пытается вернуть сервис в рабочее состояние автоматически.
+
+Параллельные запуски теперь блокируются через lock-файл, чтобы `install`/`update`/`upgrade`/`status`/`test`/`uninstall` не мешали друг другу.
 
 ## Управление сервисом
 

@@ -560,6 +560,25 @@ EOF
   ok "Proxy env written: $profile_file (takes effect on next login)"
 }
 
+# ─── proxy state helpers ─────────────────────────────────────────────────────
+proxy_env_unset() {
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+  unset all_proxy ALL_PROXY no_proxy NO_PROXY
+}
+
+proxy_direct_on() {
+  section "Entering direct network mode"
+  proxy_env_unset
+  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+  systemctl stop "${SERVICE_NAME}-iptables" 2>/dev/null || true
+}
+
+proxy_direct_off() {
+  section "Restarting transparent proxy"
+  systemctl start "${SERVICE_NAME}-iptables" 2>/dev/null || true
+  systemctl start "$SERVICE_NAME" 2>/dev/null || true
+}
+
 # ─── commands ─────────────────────────────────────────────────────────────────
 cmd_install() {
   require_root
@@ -667,15 +686,13 @@ cmd_update() {
   url=$(cat "$(sub_url_file)")
   info "Subscription URL: $url"
 
-  section "Stopping service"
-  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+  proxy_direct_on
 
   section "Re-generating config"
   rm -f "$(config_file)" 2>/dev/null || true
   generate_config "$url"
 
-  section "Restarting service"
-  systemctl start "$SERVICE_NAME"
+  proxy_direct_off
   sleep 2
   systemctl is-active --quiet "$SERVICE_NAME" && ok "Service restarted" \
     || warn "Service may not be running"
@@ -689,17 +706,17 @@ cmd_upgrade() {
 
   local current latest
   current=$(cat "${INSTALL_DIR}/version.txt")
+
+  proxy_direct_on
   latest=$(get_latest_version)
 
   if [[ "$current" == "$latest" ]]; then
     ok "Already on latest version: $current"
+    proxy_direct_off
     return 0
   fi
 
   info "Upgrading: $current → $latest"
-
-  section "Stopping service"
-  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 
   section "Downloading new binary"
   download_binary "$latest"
@@ -715,7 +732,7 @@ cmd_upgrade() {
 
   section "Restarting service"
   systemctl daemon-reload
-  systemctl start "$SERVICE_NAME"
+  proxy_direct_off
   sleep 2
   systemctl is-active --quiet "$SERVICE_NAME" && ok "Service restarted" \
     || warn "Service may not be running"

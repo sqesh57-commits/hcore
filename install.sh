@@ -400,15 +400,15 @@ iptables_add() {
 iptables_del() {
   info "Removing iptables rules..."
 
-  iptables -t nat -D OUTPUT -p tcp -j HIDDIFY 2>/dev/null || true
-  iptables -t nat -D OUTPUT -p udp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null || true
-  iptables -t nat -D OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null || true
+  while iptables -t nat -D OUTPUT -p tcp -j HIDDIFY 2>/dev/null; do :; done
+  while iptables -t nat -D OUTPUT -p udp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null; do :; done
+  while iptables -t nat -D OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null; do :; done
   iptables -t nat -F HIDDIFY 2>/dev/null || true
   iptables -t nat -X HIDDIFY 2>/dev/null || true
 
-  ip6tables -t nat -D OUTPUT -p tcp -j HIDDIFY 2>/dev/null || true
-  ip6tables -t nat -D OUTPUT -p udp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null || true
-  ip6tables -t nat -D OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null || true
+  while ip6tables -t nat -D OUTPUT -p tcp -j HIDDIFY 2>/dev/null; do :; done
+  while ip6tables -t nat -D OUTPUT -p udp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null; do :; done
+  while ip6tables -t nat -D OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null; do :; done
   ip6tables -t nat -F HIDDIFY 2>/dev/null || true
   ip6tables -t nat -X HIDDIFY 2>/dev/null || true
 
@@ -742,11 +742,13 @@ cmd_upgrade() {
 
 cmd_uninstall() {
   require_root
+  proxy_env_unset
   warn "This will remove hiddify-core, its config, service, and iptables rules."
   read -rp "Continue? [y/N] " confirm
   [[ "$confirm" =~ ^[Yy]$ ]] || { info "Aborted."; exit 0; }
 
   section "Stopping and disabling service"
+  rm -f /etc/profile.d/hiddify-proxy.sh
   systemctl stop "$SERVICE_NAME"               2>/dev/null || true
   systemctl stop "${SERVICE_NAME}-iptables"    2>/dev/null || true
   systemctl disable "$SERVICE_NAME"            2>/dev/null || true
@@ -760,6 +762,7 @@ cmd_uninstall() {
   iptables_save
 
   section "Removing files"
+  rm -f "${INSTALL_DIR}/hcore-iptables.sh"
   rm -rf "$INSTALL_DIR"
   rm -f /etc/profile.d/hiddify-proxy.sh
 

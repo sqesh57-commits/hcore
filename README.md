@@ -93,7 +93,7 @@ sudo ./install.sh test
 ```bash
 sudo ./install.sh uninstall
 ```
-Полное удаление: сервис, бинарь, конфиги, пользователь, правила iptables.
+Полное удаление: сервис, бинарь, конфиги, пользователь, proxy env profile, helper script и правила iptables с пересохранением очищенного persistent state.
 
 ## Опции установки
 

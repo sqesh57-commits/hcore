@@ -53,11 +53,11 @@
 
 ## Phase 4. Uninstall cleanup
 
-- [ ] Усилить cleanup proxy env при uninstall
-- [ ] Убедиться, что удаляются systemd units и helper script
-- [ ] Убедиться, что `iptables` и `ip6tables` очищаются полностью
-- [ ] Пересохранить пустое состояние persistent rules
-- [ ] Проверить reinstall после uninstall на чистом состоянии
+- [x] Усилить cleanup proxy env при uninstall
+- [x] Убедиться, что удаляются systemd units и helper script
+- [x] Убедиться, что `iptables` и `ip6tables` очищаются полностью
+- [x] Пересохранить пустое состояние persistent rules
+- [x] Проверить reinstall после uninstall на чистом состоянии
 
 ## Phase 5. Installed CLI
 

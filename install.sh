@@ -807,11 +807,11 @@ cmd_uninstall() {
   require_root
   proxy_env_unset
   warn "This will remove hiddify-core, its config, service, and iptables rules."
+  warn "System will be restored to default settings (no proxy)."
   read -rp "Continue? [y/N] " confirm
   [[ "$confirm" =~ ^[Yy]$ ]] || { info "Aborted."; exit 0; }
 
   section "Stopping and disabling service"
-  rm -f /etc/profile.d/hiddify-proxy.sh
   systemctl stop "$SERVICE_NAME"               2>/dev/null || true
   systemctl stop "${SERVICE_NAME}-iptables"    2>/dev/null || true
   systemctl disable "$SERVICE_NAME"            2>/dev/null || true
@@ -819,6 +819,9 @@ cmd_uninstall() {
   rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
   rm -f "/etc/systemd/system/${SERVICE_NAME}-iptables.service"
   systemctl daemon-reload
+
+  section "Removing proxy environment"
+  rm -f /etc/profile.d/hiddify-proxy.sh
 
   section "Removing iptables rules"
   iptables_del
@@ -829,12 +832,23 @@ cmd_uninstall() {
   rm -f "${INSTALL_DIR}/hcore-iptables.sh"
   rm -f "${INSTALL_DIR}/hcore"
   rm -rf "$INSTALL_DIR"
-  rm -f /etc/profile.d/hiddify-proxy.sh
+  rm -f "$(lock_file)"
 
   section "Removing user"
   userdel "$HIDDIFY_USER" 2>/dev/null || true
 
-  ok "Uninstall complete"
+  section "Verification"
+  local issues=0
+  [[ -f /etc/profile.d/hiddify-proxy.sh ]] && { warn "Profile.d file still exists"; issues=1; }
+  [[ -d "$INSTALL_DIR" ]] && { warn "Install directory still exists"; issues=1; }
+  id "$HIDDIFY_USER" &>/dev/null && { warn "User $HIDDIFY_USER still exists"; issues=1; }
+  iptables -t nat -L HIDDIFY &>/dev/null 2>&1 && { warn "iptables HIDDIFY chain still exists"; issues=1; }
+
+  if [[ $issues -eq 0 ]]; then
+    ok "Uninstall complete — system restored to default (no proxy)"
+  else
+    warn "Uninstall finished with warnings — check above"
+  fi
 }
 
 cmd_status() {

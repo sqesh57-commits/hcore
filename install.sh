@@ -640,6 +640,30 @@ proxy_direct_off() {
   systemctl start "$SERVICE_NAME" 2>/dev/null || true
 }
 
+# ─── rollback on failure ─────────────────────────────────────────────────────
+rollback_install() {
+  local exit_code=$?
+  if [[ $exit_code -eq 0 ]]; then
+    return 0
+  fi
+
+  warn "Installation failed (exit code: $exit_code) — rolling back..."
+
+  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+  systemctl stop "${SERVICE_NAME}-iptables" 2>/dev/null || true
+  iptables_del 2>/dev/null || true
+  iptables_save 2>/dev/null || true
+  rm -rf "$INSTALL_DIR" 2>/dev/null || true
+  rm -f "/etc/systemd/system/${SERVICE_NAME}.service" 2>/dev/null || true
+  rm -f "/etc/systemd/system/${SERVICE_NAME}-iptables.service" 2>/dev/null || true
+  systemctl daemon-reload 2>/dev/null || true
+  userdel "$HIDDIFY_USER" 2>/dev/null || true
+  rm -f /usr/local/sbin/hcore 2>/dev/null || true
+  rm -f /etc/profile.d/hiddify-proxy.sh 2>/dev/null || true
+
+  die "Installation rolled back — server connectivity preserved"
+}
+
 # ─── CLI install helpers ─────────────────────────────────────────────────────
 install_cli() {
   local source_script wrapper_path
@@ -659,6 +683,7 @@ EOF
 # ─── commands ─────────────────────────────────────────────────────────────────
 cmd_install() {
   require_root
+  trap rollback_install ERR
 
   # parse args
   while [[ $# -gt 0 ]]; do
@@ -690,6 +715,43 @@ cmd_install() {
   info "IPv6      : $(has_ipv6 && echo yes || echo no)"
   info "Arch      : $(detect_arch) / libc: $(detect_libc)"
   info "Install   : $INSTALL_DIR"
+
+  section "Network validation"
+  info "Testing DNS resolution..."
+  if nslookup google.com >/dev/null 2>&1 || host google.com >/dev/null 2>&1; then
+    ok "DNS resolution OK"
+  else
+    die "DNS resolution failed — cannot proceed without working DNS"
+  fi
+
+  info "Testing internet connectivity..."
+  if curl -fsSL --max-time 10 --noproxy '*' https://ifconfig.me >/dev/null 2>&1; then
+    ok "Internet connectivity OK"
+  else
+    die "No internet connectivity — cannot proceed"
+  fi
+
+  info "Testing subscription URL..."
+  if curl -fsSL --max-time 15 --noproxy '*' "$SUBSCRIPTION_URL" >/dev/null 2>&1; then
+    ok "Subscription URL reachable"
+  else
+    die "Subscription URL not reachable: $SUBSCRIPTION_URL"
+  fi
+
+  local upstream_host
+  upstream_host=$(curl -fsSL --max-time 15 --noproxy '*' "$SUBSCRIPTION_URL" 2>/dev/null \
+    | base64 -d 2>/dev/null \
+    | grep -oP '(?<=@)[^:]+(?=:)' | head -1 || echo "")
+  if [[ -n "$upstream_host" ]]; then
+    info "Upstream server: $upstream_host"
+    if nslookup "$upstream_host" >/dev/null 2>&1 || host "$upstream_host" >/dev/null 2>&1; then
+      ok "Upstream server reachable"
+    else
+      die "Cannot resolve upstream server: $upstream_host"
+    fi
+  else
+    warn "Could not extract upstream host from subscription — skipping check"
+  fi
 
   section "Pre-install recovery"
   if systemctl is-active --quiet "${SERVICE_NAME}-iptables" && ! systemctl is-active --quiet "$SERVICE_NAME"; then
@@ -783,6 +845,22 @@ cmd_install() {
   # give hiddify a moment to bind ports before iptables ExecStartPost fires
   sleep 1
   iptables_save
+
+  section "Post-install connectivity check"
+  local proxy_ok=0
+  if curl -fsSL --max-time 10 --noproxy '*' --proxy http://127.0.0.1:12334 https://ifconfig.me >/dev/null 2>&1; then
+    proxy_ok=1
+    ok "Proxy connectivity verified"
+  fi
+
+  if [[ $proxy_ok -eq 0 ]]; then
+    warn "Proxy may not be working — checking direct connection..."
+    if curl -fsSL --max-time 10 --noproxy '*' https://ifconfig.me >/dev/null 2>&1; then
+      ok "Direct connection still works — proxy may need manual configuration"
+    else
+      warn "Direct connection also failed — check network or run: journalctl -u ${SERVICE_NAME} -n 30"
+    fi
+  fi
 
   section "Verification"
   cmd_test

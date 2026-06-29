@@ -746,8 +746,6 @@ sub_resolve_url() {
 }
 
 cmd_subscription() {
-  require_root
-
   local action=""
   local url=""
 
@@ -779,6 +777,37 @@ cmd_subscription() {
   done
 
   case "${action:-help}" in
+    help)
+      cat <<SUBEOF
+
+${BOLD}hcore subscription${NC}
+
+Usage: sudo hcore subscription [command|URL]
+
+Commands:
+  <URL>                     Replace primary subscription
+  --show                    Show current subscription and status
+  --test                    Test primary + fallback subscription URLs
+  --list                    List all configured subscriptions
+  --add-fallback <URL>      Add a fallback subscription URL
+  --remove-fallback <idx>   Remove fallback by index (1-based)
+
+Examples:
+  sudo hcore subscription "https://new-sub-url/..."
+  sudo hcore subscription --show
+  sudo hcore subscription --test
+  sudo hcore subscription --list
+  sudo hcore subscription --add-fallback "https://backup-sub/..."
+  sudo hcore subscription --remove-fallback 1
+
+SUBEOF
+      return 0
+      ;;
+  esac
+
+  require_root
+
+  case "${action}" in
     show)
       section "Current subscription"
       if [[ -f "$(sub_url_file)" ]]; then
@@ -1380,6 +1409,7 @@ cmd_uninstall() {
 }
 
 cmd_status() {
+  require_root
   section "Summary"
 
   local service_state ipt_state config_state profile_state cli_state

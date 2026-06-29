@@ -277,6 +277,123 @@
 
 ---
 
+## 7b. Сценарии subscription management (P0)
+
+### S1. Замена подписки (`hcore subscription <URL>`)
+
+Проверить:
+- Новая URL доступна перед заменой
+- Бэкап текущего конфига создан (`current-config.fixed.json.bak`)
+- Новый конфиг сгенерирован из новой подписки
+- Сервис перезапущен
+- Connectivity проверена (proxy != direct IP)
+- `hcore test` PASS после замены
+
+### S2. Rollback при ошибке генерации
+
+Проверить:
+- Указать невалидную подписку (недоступная URL)
+- После ошибки конфиг откачен к предыдущему
+- Сервис работает с предыдущим конфигом
+- `hcore status` показывает предыдущую подписку
+
+### S3. Замена подписки с fallback
+
+Проверить:
+- Настроить fallback подписку
+- Заменить основную на недоступную
+- Проверить что fallback используется автоматически
+- `hcore subscription --list` показывает обе
+
+### S4. `hcore subscription --show`
+
+Проверить:
+- Показывает замаскированный URL
+- Показывает статус доступности (reachable/unreachable)
+
+### S5. `hcore subscription --test`
+
+Проверить:
+- Тестирует primary URL
+- Тестирует все fallback URL
+- Показывает результат для каждого
+
+### S6. `hcore subscription --list`
+
+Проверить:
+- Показывает primary с меткой
+- Показывает все fallback с индексами
+
+### S7. `hcore subscription --add-fallback`
+
+Проверить:
+- Добавляет URL в fallback файл
+- Дедуплицирует (не добавляет повторно)
+- Файл доступен root:HIDDIFY_USER 640
+
+### S8. `hcore subscription --remove-fallback <idx>`
+
+Проверить:
+- Удаляет correct URL по индексу
+- Out of range → error
+- Последний удалённый → файл очищен
+
+---
+
+## 7c. Сценарии direct-on / direct-off (P1)
+
+### S9. `hcore direct-on`
+
+Проверить:
+- Останавливает hiddify сервис
+- Останавливает iptables сервис
+- Снимает proxy env vars
+- Трафик идёт напрямую (curl без proxy работает)
+- `hcore status` показывает inactive
+
+### S10. `hcore direct-off`
+
+Проверить:
+- Запускает iptables сервис
+- Запускает hiddify сервис
+- Трафик идёт через proxy
+- `hcore test` PASS
+
+### S11. direct-on → direct-off цикл
+
+Проверить:
+- Повторный cycle работает без ошибок
+- Сервис восстанавливается полностью
+- iptables rules восстанавливаются
+
+---
+
+## 7d. Сценарии health check (P1)
+
+### S12. `hcore health` — все checks pass
+
+Проверить (на работающем proxy):
+- Service active ✓
+- iptables active ✓
+- Redirect port listening ✓
+- DNS port listening ✓
+- OUTPUT → HIDDIFY rule ✓
+- Config exists ✓
+- Subscription configured ✓
+- Proxy IP ≠ direct IP ✓
+- No recent errors ✓
+- Итог: "All N checks passed"
+
+### S13. `hcore health` — degraded state
+
+Проверить (после `hcore direct-on`):
+- Service inactive → ✗
+- iptables inactive → ✗
+- Proxy IP check → ✗
+- Итог: "N/M checks passed" (не all)
+
+---
+
 ## 8. Предмерджевый master-checklist
 
 Это тот чеклист, который надо пройти перед merge `dev -> main`.

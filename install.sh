@@ -155,6 +155,8 @@ setup_dirs() {
   mkdir -p "${INSTALL_DIR}/data/webui"
   chown -R "$HIDDIFY_USER":"$HIDDIFY_USER" "$(data_dir)"
   chmod -R 770 "$(data_dir)"
+  # fix cache.db permissions if it exists (hiddify-svc needs write access)
+  [[ -f "$(data_dir)/cache.db" ]] && chown "$HIDDIFY_USER":"$HIDDIFY_USER" "$(data_dir)/cache.db"
   # log: root-owned but group-readable so both root and hiddify-svc can write
   touch "$(log_file)"
   chown root:"$HIDDIFY_USER" "$(log_file)"

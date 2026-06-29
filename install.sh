@@ -29,6 +29,7 @@ SERVICE_NAME="hiddify"
 SUBSCRIPTION_URL=""
 GITHUB_REPO="hiddify/hiddify-core"
 GITHUB_API="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+LOCK_DIR="/run/lock"
 
 # ports (must match inbounds in generated config)
 PORT_MIXED=12334
@@ -42,6 +43,21 @@ require_root() {
 
 require_cmd() {
   command -v "$1" &>/dev/null || die "Required command not found: $1 — install it first"
+}
+
+lock_file() {
+  echo "${LOCK_DIR}/hcore.lock"
+}
+
+acquire_lock() {
+  mkdir -p "$LOCK_DIR"
+  exec 9>"$(lock_file)"
+  if ! flock -n 9; then
+    local holder
+    holder=$(cat "$(lock_file)" 2>/dev/null || true)
+    die "Another hcore operation is already running${holder:+: $holder}"
+  fi
+  echo "pid=$$ cmd=${1:-unknown}" > "$(lock_file)"
 }
 
 install_deps() {
@@ -179,6 +195,8 @@ patch_config() {
   local src="$1"
   local dst="$2"
 
+  [[ -s "$src" ]] || die "Config patch source is missing or empty: $src"
+
   python3 - "$src" "$dst" <<'PY'
 import json, sys
 
@@ -187,10 +205,19 @@ src, dst = sys.argv[1], sys.argv[2]
 with open(src, "r", encoding="utf-8") as f:
     d = json.load(f)
 
+if not isinstance(d, dict):
+    raise SystemExit("config root must be a JSON object")
+
+if "outbounds" not in d or not isinstance(d.get("outbounds"), list) or not d["outbounds"]:
+    raise SystemExit("config must contain a non-empty outbounds array")
+
+if "route" in d and not isinstance(d["route"], dict):
+    raise SystemExit("route must be an object when present")
+
 # 1. remove broken balance outbound (empty strategy = crash)
 broken = {
-    o["tag"] for o in d.get("outbounds", [])
-    if o.get("type") == "balancer" and not o.get("strategy", "").strip()
+    o.get("tag") for o in d.get("outbounds", [])
+    if isinstance(o, dict) and o.get("type") == "balancer" and not str(o.get("strategy", "")).strip() and o.get("tag")
 }
 
 if broken:
@@ -198,32 +225,33 @@ if broken:
 
     # fix selector outbounds list and default
     for o in d.get("outbounds", []):
-        if o.get("tag") == "select":
+        if o.get("tag") == "select" and isinstance(o.get("outbounds", []), list):
             o["outbounds"] = [x for x in o.get("outbounds", []) if x not in broken]
+            if not o.get("outbounds"):
+                raise SystemExit("select outbound lost all candidates after balancer cleanup")
             if o.get("default") in broken:
-                # pick first non-broken outbound as default
                 candidates = [x for x in o.get("outbounds", []) if x != "select"]
                 o["default"] = candidates[0] if candidates else o["outbounds"][0]
 
     # fix route rules and final
-    route = d.get("route", {})
+    route = d.get("route") or {}
+    tags = [o.get("tag") for o in d.get("outbounds", []) if o.get("tag")]
+    if not tags:
+        raise SystemExit("no outbound tags remain after balancer cleanup")
     if route.get("final") in broken:
-        # fallback to "lowest" if present, else first available outbound
-        tags = [o["tag"] for o in d.get("outbounds", [])]
         route["final"] = "lowest" if "lowest" in tags else tags[0]
     for r in route.get("rules", []):
-        if r.get("outbound") in broken:
+        if isinstance(r, dict) and r.get("outbound") in broken:
             r["outbound"] = route.get("final", "direct")
     d["route"] = route
 
 # 2. ensure all balancers have a valid strategy
 for o in d.get("outbounds", []):
-    if o.get("type") == "balancer" and not o.get("strategy", "").strip():
+    if isinstance(o, dict) and o.get("type") == "balancer" and not str(o.get("strategy", "")).strip():
         o["strategy"] = "lowest-delay"
 
 # 3. ensure required inbounds exist
-existing_types = {i.get("type") for i in d.get("inbounds", [])}
-existing_tags  = {i.get("tag")  for i in d.get("inbounds", [])}
+existing_tags = {i.get("tag") for i in d.get("inbounds", []) if isinstance(i, dict) and i.get("tag")}
 
 required_inbounds = [
     {
@@ -256,12 +284,17 @@ for ib in required_inbounds:
     if ib["tag"] not in existing_tags:
         d.setdefault("inbounds", []).append(ib)
 
+if not isinstance(d.get("inbounds"), list) or not d["inbounds"]:
+    raise SystemExit("config must contain inbounds after patching")
+
 with open(dst, "w", encoding="utf-8") as f:
     json.dump(d, f, ensure_ascii=False, indent=2)
 
 changed = "with balancer fix" if broken else "no balancer issues found"
 print(f"[patch] saved {dst} ({changed})")
 PY
+
+  [[ -s "$dst" ]] || die "Config patch output is missing or empty: $dst"
 }
 
 # ─── binary management ────────────────────────────────────────────────────────
@@ -269,6 +302,40 @@ get_latest_version() {
   curl -fsSL "$GITHUB_API" 2>/dev/null \
     | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'])" \
     || die "Failed to fetch latest version from GitHub API"
+}
+
+download_file() {
+  local url="$1"
+  local dst="$2"
+  local part="${dst}.part"
+
+  info "Downloading $(basename "$dst")..."
+
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --location --show-error --progress-bar \
+      --connect-timeout 20 \
+      --max-time 900 \
+      --retry 8 \
+      --retry-delay 5 \
+      --retry-max-time 900 \
+      --retry-all-errors \
+      -C - \
+      "$url" \
+      -o "$part" \
+      || die "Download failed: $url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget --tries=8 \
+      --timeout=30 \
+      --continue \
+      -O "$part" \
+      "$url" \
+      || die "Download failed: $url"
+  else
+    die "Neither curl nor wget found"
+  fi
+
+  [[ -s "$part" ]] || die "Downloaded file is empty: $part"
+  mv -f "$part" "$dst"
 }
 
 download_binary() {
@@ -284,8 +351,7 @@ download_binary() {
   tmp=$(mktemp -d)
 
   info "Downloading ${asset} (${version})..."
-  curl -fsSL --progress-bar "$url" -o "${tmp}/${asset}" \
-    || die "Download failed: $url"
+  download_file "$url" "${tmp}/${asset}"
 
   info "Extracting..."
   mkdir -p "${tmp}/extracted"
@@ -367,15 +433,15 @@ iptables_add() {
 iptables_del() {
   info "Removing iptables rules..."
 
-  iptables -t nat -D OUTPUT -p tcp -j HIDDIFY 2>/dev/null || true
-  iptables -t nat -D OUTPUT -p udp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null || true
-  iptables -t nat -D OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null || true
+  while iptables -t nat -D OUTPUT -p tcp -j HIDDIFY 2>/dev/null; do :; done
+  while iptables -t nat -D OUTPUT -p udp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null; do :; done
+  while iptables -t nat -D OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null; do :; done
   iptables -t nat -F HIDDIFY 2>/dev/null || true
   iptables -t nat -X HIDDIFY 2>/dev/null || true
 
-  ip6tables -t nat -D OUTPUT -p tcp -j HIDDIFY 2>/dev/null || true
-  ip6tables -t nat -D OUTPUT -p udp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null || true
-  ip6tables -t nat -D OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null || true
+  while ip6tables -t nat -D OUTPUT -p tcp -j HIDDIFY 2>/dev/null; do :; done
+  while ip6tables -t nat -D OUTPUT -p udp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null; do :; done
+  while ip6tables -t nat -D OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null; do :; done
   ip6tables -t nat -F HIDDIFY 2>/dev/null || true
   ip6tables -t nat -X HIDDIFY 2>/dev/null || true
 
@@ -527,6 +593,41 @@ EOF
   ok "Proxy env written: $profile_file (takes effect on next login)"
 }
 
+# ─── proxy state helpers ─────────────────────────────────────────────────────
+proxy_env_unset() {
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+  unset all_proxy ALL_PROXY no_proxy NO_PROXY
+}
+
+proxy_direct_on() {
+  section "Entering direct network mode"
+  proxy_env_unset
+  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+  systemctl stop "${SERVICE_NAME}-iptables" 2>/dev/null || true
+}
+
+proxy_direct_off() {
+  section "Restarting transparent proxy"
+  systemctl start "${SERVICE_NAME}-iptables" 2>/dev/null || true
+  systemctl start "$SERVICE_NAME" 2>/dev/null || true
+}
+
+# ─── CLI install helpers ─────────────────────────────────────────────────────
+install_cli() {
+  local source_script wrapper_path
+  source_script=$(readlink -f "$0" 2>/dev/null || echo "$0")
+  wrapper_path="/usr/local/sbin/hcore"
+
+  install -d /usr/local/sbin
+  install -m 755 "$source_script" "${INSTALL_DIR}/hcore"
+
+  cat > "$wrapper_path" <<EOF
+#!/usr/bin/env bash
+exec "${INSTALL_DIR}/hcore" "\$@"
+EOF
+  chmod 755 "$wrapper_path"
+}
+
 # ─── commands ─────────────────────────────────────────────────────────────────
 cmd_install() {
   require_root
@@ -561,6 +662,16 @@ cmd_install() {
   info "IPv6      : $(has_ipv6 && echo yes || echo no)"
   info "Arch      : $(detect_arch) / libc: $(detect_libc)"
   info "Install   : $INSTALL_DIR"
+
+  section "Pre-install recovery"
+  if systemctl is-active --quiet "${SERVICE_NAME}-iptables" && ! systemctl is-active --quiet "$SERVICE_NAME"; then
+    warn "Detected partial install state: iptables active while service inactive"
+    warn "Cleaning stale transparent proxy state before reinstall"
+    systemctl stop "${SERVICE_NAME}-iptables" 2>/dev/null || true
+    iptables_del
+    iptables_save
+  fi
+  systemctl daemon-reload 2>/dev/null || true
 
   section "Creating directories and user"
   if ! id "$HIDDIFY_USER" &>/dev/null; then
@@ -598,6 +709,9 @@ cmd_install() {
   write_service
   write_env_profile
 
+  section "Installing CLI"
+  install_cli
+
   section "Starting service"
   systemctl daemon-reload
   systemctl enable "${SERVICE_NAME}-iptables"
@@ -622,8 +736,9 @@ cmd_install() {
   echo -e "  Install dir : ${CYAN}${INSTALL_DIR}${NC}"
   echo -e "  Service     : ${CYAN}systemctl status ${SERVICE_NAME}${NC}"
   echo -e "  Logs        : ${CYAN}journalctl -u ${SERVICE_NAME} -f${NC}"
-  echo -e "  Update sub  : ${CYAN}sudo $0 update${NC}"
-  echo -e "  Upgrade bin : ${CYAN}sudo $0 upgrade${NC}"
+  echo -e "  CLI         : ${CYAN}sudo hcore status${NC}"
+  echo -e "  Update sub  : ${CYAN}sudo hcore update${NC}"
+  echo -e "  Upgrade bin : ${CYAN}sudo hcore upgrade${NC}"
 }
 
 cmd_update() {
@@ -634,15 +749,13 @@ cmd_update() {
   url=$(cat "$(sub_url_file)")
   info "Subscription URL: $url"
 
-  section "Stopping service"
-  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+  proxy_direct_on
 
   section "Re-generating config"
   rm -f "$(config_file)" 2>/dev/null || true
   generate_config "$url"
 
-  section "Restarting service"
-  systemctl start "$SERVICE_NAME"
+  proxy_direct_off
   sleep 2
   systemctl is-active --quiet "$SERVICE_NAME" && ok "Service restarted" \
     || warn "Service may not be running"
@@ -656,17 +769,17 @@ cmd_upgrade() {
 
   local current latest
   current=$(cat "${INSTALL_DIR}/version.txt")
+
+  proxy_direct_on
   latest=$(get_latest_version)
 
   if [[ "$current" == "$latest" ]]; then
     ok "Already on latest version: $current"
+    proxy_direct_off
     return 0
   fi
 
   info "Upgrading: $current → $latest"
-
-  section "Stopping service"
-  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 
   section "Downloading new binary"
   download_binary "$latest"
@@ -682,7 +795,7 @@ cmd_upgrade() {
 
   section "Restarting service"
   systemctl daemon-reload
-  systemctl start "$SERVICE_NAME"
+  proxy_direct_off
   sleep 2
   systemctl is-active --quiet "$SERVICE_NAME" && ok "Service restarted" \
     || warn "Service may not be running"
@@ -692,11 +805,13 @@ cmd_upgrade() {
 
 cmd_uninstall() {
   require_root
+  proxy_env_unset
   warn "This will remove hiddify-core, its config, service, and iptables rules."
   read -rp "Continue? [y/N] " confirm
   [[ "$confirm" =~ ^[Yy]$ ]] || { info "Aborted."; exit 0; }
 
   section "Stopping and disabling service"
+  rm -f /etc/profile.d/hiddify-proxy.sh
   systemctl stop "$SERVICE_NAME"               2>/dev/null || true
   systemctl stop "${SERVICE_NAME}-iptables"    2>/dev/null || true
   systemctl disable "$SERVICE_NAME"            2>/dev/null || true
@@ -710,6 +825,9 @@ cmd_uninstall() {
   iptables_save
 
   section "Removing files"
+  rm -f /usr/local/sbin/hcore
+  rm -f "${INSTALL_DIR}/hcore-iptables.sh"
+  rm -f "${INSTALL_DIR}/hcore"
   rm -rf "$INSTALL_DIR"
   rm -f /etc/profile.d/hiddify-proxy.sh
 
@@ -720,6 +838,27 @@ cmd_uninstall() {
 }
 
 cmd_status() {
+  section "Summary"
+
+  local service_state ipt_state config_state profile_state cli_state
+  service_state=$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || echo inactive)
+  ipt_state=$(systemctl is-active "${SERVICE_NAME}-iptables" 2>/dev/null || echo inactive)
+  [[ -s "$(fixed_config)" ]] && config_state=present || config_state=missing
+  [[ -f /etc/profile.d/hiddify-proxy.sh ]] && profile_state=present || profile_state=missing
+  [[ -x /usr/local/sbin/hcore ]] && cli_state=present || cli_state=missing
+
+  echo "service=$service_state iptables=$ipt_state fixed_config=$config_state profile=$profile_state cli=$cli_state"
+
+  if [[ "$service_state" != "active" ]]; then
+    warn "Service is not active"
+  fi
+  if [[ "$ipt_state" != "active" ]]; then
+    warn "iptables helper service is not active"
+  fi
+  if [[ "$config_state" != "present" ]]; then
+    warn "Patched config is missing or empty: $(fixed_config)"
+  fi
+
   section "Service"
   systemctl status "$SERVICE_NAME" --no-pager 2>/dev/null || echo "Service not found"
 
@@ -748,20 +887,20 @@ cmd_status() {
 cmd_test() {
   section "Proxy test"
 
-  local via_env direct_ipv4 as_nobody
+  local via_env direct_ipv4 as_nobody server_ip leak=0
   via_env=$(curl -s --max-time 8 https://ifconfig.me 2>/dev/null || echo "FAIL")
   direct_ipv4=$(curl -s --max-time 8 --noproxy '*' -4 https://ifconfig.me 2>/dev/null || echo "FAIL")
   as_nobody=$(sudo -u nobody curl -s --max-time 8 https://ifconfig.me 2>/dev/null || echo "FAIL")
-
-  local server_ip
   server_ip=$(ip route get 1.1.1.1 2>/dev/null | awk '/src/{print $7}' | head -1)
 
   result_line() {
     local label="$1" val="$2"
     if [[ "$val" == "FAIL" ]]; then
       echo -e "  ${YELLOW}?${NC}  $label : ${YELLOW}FAIL${NC}"
-    elif [[ "$val" == "$server_ip" ]]; then
-      echo -e "  ${RED}✗${NC}  $label : ${RED}$val${NC} (direct — NOT proxied)"
+      leak=1
+    elif [[ -n "$server_ip" && "$val" == "$server_ip" ]]; then
+      echo -e "  ${RED}✗${NC}  $label : ${RED}$val${NC} (direct, NOT proxied)"
+      leak=1
     else
       echo -e "  ${GREEN}✓${NC}  $label : ${GREEN}$val${NC} (proxied)"
     fi
@@ -773,10 +912,28 @@ cmd_test() {
   result_line "As nobody (no env)  " "$as_nobody"
   echo ""
 
-  if [[ "$direct_ipv4" != "$server_ip" && "$as_nobody" != "$server_ip" ]]; then
+  section "Sanity checks"
+  systemctl is-active --quiet "$SERVICE_NAME" \
+    && echo -e "  ${GREEN}✓${NC}  Service active" \
+    || { echo -e "  ${RED}✗${NC}  Service inactive"; leak=1; }
+
+  systemctl is-active --quiet "${SERVICE_NAME}-iptables" \
+    && echo -e "  ${GREEN}✓${NC}  iptables service active" \
+    || { echo -e "  ${RED}✗${NC}  iptables service inactive"; leak=1; }
+
+  ss -ltn 2>/dev/null | grep -q ":$PORT_REDIR " \
+    && echo -e "  ${GREEN}✓${NC}  Redirect port $PORT_REDIR listening" \
+    || { echo -e "  ${RED}✗${NC}  Redirect port $PORT_REDIR not listening"; leak=1; }
+
+  iptables -t nat -S OUTPUT 2>/dev/null | grep -q -- "-A OUTPUT -p tcp -j HIDDIFY" \
+    && echo -e "  ${GREEN}✓${NC}  OUTPUT jumps to HIDDIFY" \
+    || { echo -e "  ${RED}✗${NC}  Missing OUTPUT -> HIDDIFY rule"; leak=1; }
+
+  if [[ $leak -eq 0 ]]; then
     ok "All traffic is going through proxy"
   else
-    warn "Some traffic may be leaking — check iptables rules"
+    warn "Proxy sanity checks found problems"
+    return 1
   fi
 }
 
@@ -787,6 +944,8 @@ usage() {
 ${BOLD}hiddify-core transparent proxy installer${NC}
 
 Usage: sudo $0 <command> [options]
+
+After install, operational commands are also available via: sudo hcore <command>
 
 Commands:
   install --subscription-url <URL> [--install-dir <DIR>]
@@ -807,6 +966,8 @@ Examples:
   sudo $0 update
   sudo $0 upgrade
   sudo $0 status
+  sudo hcore test
+  sudo hcore uninstall
 
 EOF
 }
@@ -814,6 +975,8 @@ EOF
 main() {
   local cmd="${1:-}"
   shift || true
+
+  [[ -n "$cmd" && "$cmd" != "--help" && "$cmd" != "-h" ]] && acquire_lock "$cmd"
 
   case "$cmd" in
     install)   cmd_install "$@" ;;

@@ -65,8 +65,12 @@ section "2. Subscription URL test"
 
 info "Testing URL: ${SUB_URL:0:60}..."
 
-if curl -fsSL --max-time 10 "$SUB_URL" >/dev/null 2>&1; then
-  ok "URL is reachable"
+# Try direct first, then via proxy if active
+if curl -fsSL --max-time 10 --noproxy '*' "$SUB_URL" >/dev/null 2>&1; then
+  ok "URL is reachable (direct)"
+elif systemctl is-active --quiet hiddify 2>/dev/null && \
+     curl -fsSL --max-time 10 --proxy http://127.0.0.1:12334 "$SUB_URL" >/dev/null 2>&1; then
+  ok "URL is reachable (via proxy)"
 else
   die "URL is not reachable: $SUB_URL"
 fi

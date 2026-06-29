@@ -65,14 +65,32 @@ section "2. Subscription URL test"
 
 info "Testing URL: ${SUB_URL:0:60}..."
 
-# Try direct first, then via proxy if active
+# Extract host from URL and resolve it
+SUB_HOST=$(echo "$SUB_URL" | sed -E 's|https?://([^/:]+).*|\1|')
+SUB_IP=$(nslookup "$SUB_HOST" 2>/dev/null | grep "Address:" | tail -1 | awk '{print $2}' || echo "")
+
+# Add iptables bypass if proxy is active and subscription is on same server
+if [[ -n "$SUB_IP" ]] && systemctl is-active --quiet hiddify 2>/dev/null; then
+  info "Adding temporary iptables bypass for $SUB_IP..."
+  sudo iptables -t nat -I OUTPUT -d "$SUB_IP" -j RETURN 2>/dev/null || true
+  BYPASS_ADDED=1
+fi
+
+# Test URL
 if curl -fsSL --max-time 10 --noproxy '*' "$SUB_URL" >/dev/null 2>&1; then
-  ok "URL is reachable (direct)"
-elif systemctl is-active --quiet hiddify 2>/dev/null && \
-     curl -fsSL --max-time 10 --proxy http://127.0.0.1:12334 "$SUB_URL" >/dev/null 2>&1; then
-  ok "URL is reachable (via proxy)"
+  ok "URL is reachable"
 else
-  die "URL is not reachable: $SUB_URL"
+  # Try via proxy as fallback
+  if curl -fsSL --max-time 10 --proxy http://127.0.0.1:12334 "$SUB_URL" >/dev/null 2>&1; then
+    ok "URL is reachable (via proxy)"
+  else
+    fail "URL is not reachable: $SUB_URL"
+  fi
+fi
+
+# Remove bypass if we added it
+if [[ "${BYPASS_ADDED:-0}" == "1" ]]; then
+  sudo iptables -t nat -D OUTPUT -d "$SUB_IP" -j RETURN 2>/dev/null || true
 fi
 
 CONTENT_TYPE=$(curl -fsSI --max-time 10 "$SUB_URL" 2>/dev/null | grep -i content-type | head -1 || true)

@@ -65,9 +65,12 @@ section "2. Subscription URL test"
 
 info "Testing URL: ${SUB_URL:0:60}..."
 
-# Extract host from URL and resolve it
+# Extract host from URL and resolve it (prefer IPv4)
 SUB_HOST=$(echo "$SUB_URL" | sed -E 's|https?://([^/:]+).*|\1|')
-SUB_IP=$(nslookup "$SUB_HOST" 2>/dev/null | grep "Address:" | tail -1 | awk '{print $2}' || echo "")
+SUB_IP=$(nslookup "$SUB_HOST" 2>/dev/null | grep -E "^[[:space:]]*Address:" | tail -1 | awk '{print $2}' | grep -v ":" || echo "")
+if [[ -z "$SUB_IP" ]]; then
+  SUB_IP=$(host "$SUB_HOST" 2>/dev/null | head -1 | awk '{print $NF}' | grep -v ":" || echo "")
+fi
 
 # Add iptables bypass if proxy is active and subscription is on same server
 if [[ -n "$SUB_IP" ]] && systemctl is-active --quiet hiddify 2>/dev/null; then

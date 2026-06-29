@@ -4,6 +4,11 @@
 # Supports: Debian 12, Ubuntu 22/24, Raspberry Pi OS (arm64)
 # Usage:
 #   sudo ./install.sh install --subscription-url <URL> [--install-dir <DIR>]
+#   sudo ./install.sh subscription <URL> | --show | --test | --list
+#   sudo ./install.sh subscription --add-fallback <URL>
+#   sudo ./install.sh subscription --remove-fallback <index>
+#   sudo ./install.sh direct-on | direct-off
+#   sudo ./install.sh health
 #   sudo ./install.sh update
 #   sudo ./install.sh upgrade
 #   sudo ./install.sh uninstall
@@ -142,8 +147,9 @@ detect_libc() {
 data_dir()     { echo "${INSTALL_DIR}/data"; }
 config_file()  { echo "${INSTALL_DIR}/data/current-config.json"; }
 fixed_config() { echo "${INSTALL_DIR}/current-config.fixed.json"; }
-sub_url_file() { echo "${INSTALL_DIR}/subscription.url"; }
-log_file()     { echo "${INSTALL_DIR}/hiddify-core.log"; }
+sub_url_file()     { echo "${INSTALL_DIR}/subscription.url"; }
+sub_fallback_file() { echo "${INSTALL_DIR}/subscription.fallback"; }
+log_file()         { echo "${INSTALL_DIR}/hiddify-core.log"; }
 
 setup_dirs() {
   mkdir -p "${INSTALL_DIR}" "$(data_dir)"
@@ -640,6 +646,640 @@ proxy_direct_off() {
   systemctl start "$SERVICE_NAME" 2>/dev/null || true
 }
 
+# ─── subscription management ────────────────────────────────────────────────
+sub_backup_config() {
+  local bak="$(fixed_config).bak"
+  if [[ -f "$(fixed_config)" ]]; then
+    cp -a "$(fixed_config)" "$bak"
+    ok "Config backed up: $bak"
+  fi
+}
+
+sub_restore_config() {
+  local bak="$(fixed_config).bak"
+  if [[ -f "$bak" ]]; then
+    cp -a "$bak" "$(fixed_config)"
+    ok "Config restored from backup"
+    return 0
+  fi
+  warn "No backup config found to restore"
+  return 1
+}
+
+sub_test_url() {
+  local url="$1"
+  curl -fsSL --max-time 15 --noproxy '*' "$url" >/dev/null 2>&1
+}
+
+sub_validate_url() {
+  local url="$1"
+  [[ -n "$url" ]] || die "Subscription URL cannot be empty"
+  [[ "$url" =~ ^https?:// ]] || die "Invalid URL format: $url"
+}
+
+# Fallback subscriptions: one URL per line in fallback file
+fallback_list() {
+  [[ -f "$(sub_fallback_file)" ]] && cat "$(sub_fallback_file)" || true
+}
+
+fallback_add() {
+  local url="$1"
+  sub_validate_url "$url"
+  local existing
+  existing=$(fallback_list)
+  if echo "$existing" | grep -qxF "$url"; then
+    warn "URL already in fallback list"
+    return 0
+  fi
+  echo "$url" >> "$(sub_fallback_file)"
+  chown root:"$HIDDIFY_USER" "$(sub_fallback_file)"
+  chmod 640 "$(sub_fallback_file)"
+  ok "Fallback URL added"
+}
+
+fallback_remove() {
+  local index="$1"
+  [[ -f "$(sub_fallback_file)" ]] || die "No fallback URLs configured"
+  local total
+  total=$(wc -l < "$(sub_fallback_file)")
+  [[ "$index" -ge 1 && "$index" -le "$total" ]] || die "Index $index out of range (1-$total)"
+  local tmp
+  tmp=$(mktemp)
+  local i=0
+  while IFS= read -r line; do
+    i=$((i + 1))
+    [[ "$i" -ne "$index" ]] && echo "$line" >> "$tmp"
+  done < "$(sub_fallback_file)"
+  mv "$tmp" "$(sub_fallback_file)"
+  ok "Removed fallback #$index"
+}
+
+# Try primary + fallbacks, return the working URL
+sub_resolve_url() {
+  local primary
+  primary=$(cat "$(sub_url_file)" 2>/dev/null || echo "")
+
+  if [[ -n "$primary" ]] && sub_test_url "$primary"; then
+    echo "$primary"
+    return 0
+  fi
+  warn "Primary subscription unreachable, trying fallbacks..."
+
+  local i=0
+  while IFS= read -r fb; do
+    i=$((i + 1))
+    if sub_test_url "$fb"; then
+      warn "Fallback #$i is reachable, switching..."
+      echo "$fb"
+      return 0
+    fi
+  done < <(fallback_list)
+
+  # All failed — try to use last working config
+  if [[ -f "$(fixed_config)" ]]; then
+    warn "All subscriptions unreachable — using last known config"
+    echo "__LAST_KNOWN__"
+    return 0
+  fi
+
+  die "All subscriptions unreachable and no saved config"
+}
+
+cmd_subscription() {
+  local action=""
+  local url=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --show)
+        action="show"; shift ;;
+      --test)
+        action="test"; shift ;;
+      --list)
+        action="list"; shift ;;
+      --add-fallback)
+        action="add-fallback"; url="$2"; shift 2 ;;
+      --remove-fallback)
+        action="remove-fallback"; url="$2"; shift 2 ;;
+      --help|-h)
+        action="help"; shift ;;
+      -*)
+        die "Unknown subscription option: $1" ;;
+      *)
+        if [[ -z "$action" ]]; then
+          action="set"
+          url="$1"
+        else
+          die "Unexpected argument: $1"
+        fi
+        shift ;;
+    esac
+  done
+
+  case "${action:-help}" in
+    help)
+      cat <<SUBEOF
+
+${BOLD}hcore subscription${NC}
+
+Usage: sudo hcore subscription [command|URL]
+
+Commands:
+  <URL>                     Replace primary subscription
+  --show                    Show current subscription and status
+  --test                    Test primary + fallback subscription URLs
+  --list                    List all configured subscriptions
+  --add-fallback <URL>      Add a fallback subscription URL
+  --remove-fallback <idx>   Remove fallback by index (1-based)
+
+Examples:
+  sudo hcore subscription "https://new-sub-url/..."
+  sudo hcore subscription --show
+  sudo hcore subscription --test
+  sudo hcore subscription --list
+  sudo hcore subscription --add-fallback "https://backup-sub/..."
+  sudo hcore subscription --remove-fallback 1
+
+SUBEOF
+      return 0
+      ;;
+  esac
+
+  require_root
+
+  case "${action}" in
+    show)
+      section "Current subscription"
+      if [[ -f "$(sub_url_file)" ]]; then
+        local sub_url sub_display
+        sub_url=$(cat "$(sub_url_file)")
+        sub_display=$(echo "$sub_url" | sed -E 's|(/[^/]{4})[^/]*(/\?|$)|\1****\2|; s|(\?secret=)[^&]*|\1****|')
+        echo -e "  URL: ${CYAN}${sub_display}${NC}"
+        if sub_test_url "$sub_url"; then
+          echo -e "  Status: ${GREEN}reachable${NC}"
+        else
+          echo -e "  Status: ${RED}unreachable${NC}"
+        fi
+      else
+        echo -e "  ${YELLOW}No subscription configured${NC}"
+      fi
+      ;;
+
+    test)
+      section "Testing subscription"
+      if [[ -f "$(sub_url_file)" ]]; then
+        local sub_url
+        sub_url=$(cat "$(sub_url_file)")
+        if sub_test_url "$sub_url"; then
+          ok "Primary subscription is reachable"
+        else
+          warn "Primary subscription is unreachable"
+        fi
+      else
+        warn "No subscription configured"
+      fi
+      local fb_count
+      fb_count=$(fallback_list | grep -c . || echo 0)
+      if [[ "$fb_count" -gt 0 ]]; then
+        info "Testing $fb_count fallback URL(s)..."
+        local i=0
+        while IFS= read -r fb; do
+          i=$((i + 1))
+          if sub_test_url "$fb"; then
+            echo -e "  Fallback #$i: ${GREEN}reachable${NC}"
+          else
+            echo -e "  Fallback #$i: ${RED}unreachable${NC}"
+          fi
+        done < <(fallback_list)
+      fi
+      ;;
+
+    list)
+      section "All subscriptions"
+      if [[ -f "$(sub_url_file)" ]]; then
+        local sub_url sub_display
+        sub_url=$(cat "$(sub_url_file)")
+        sub_display=$(echo "$sub_url" | sed -E 's|(/[^/]{4})[^/]*(/\?|$)|\1****\2|; s|(\?secret=)[^&]*|\1****|')
+        echo -e "  ${BOLD}Primary:${NC} ${CYAN}${sub_display}${NC}"
+      fi
+      local fb_count
+      fb_count=$(fallback_list | grep -c . || echo 0)
+      if [[ "$fb_count" -gt 0 ]]; then
+        local i=0
+        while IFS= read -r fb; do
+          i=$((i + 1))
+          local fb_display
+          fb_display=$(echo "$fb" | sed -E 's|(/[^/]{4})[^/]*(/\?|$)|\1****\2|; s|(\?secret=)[^&]*|\1****|')
+          echo -e "  ${BOLD}Fallback #$i:${NC} ${CYAN}${fb_display}${NC}"
+        done < <(fallback_list)
+      else
+        echo -e "  ${YELLOW}No fallback URLs configured${NC}"
+      fi
+      ;;
+
+    add-fallback)
+      [[ -n "$url" ]] || die "Usage: hcore subscription --add-fallback <URL>"
+      sub_validate_url "$url"
+      section "Adding fallback subscription"
+      fallback_add "$url"
+      ;;
+
+    remove-fallback)
+      [[ -n "$url" ]] || die "Usage: hcore subscription --remove-fallback <index>"
+      section "Removing fallback subscription"
+      fallback_remove "$url"
+      ;;
+
+    set)
+      [[ -n "$url" ]] || die "Usage: hcore subscription <URL>"
+      sub_validate_url "$url"
+
+      section "Replacing subscription"
+
+      # 1. Verify new URL is reachable
+      info "Testing new subscription URL..."
+      if ! sub_test_url "$url"; then
+        die "New subscription URL is not reachable: $url"
+      fi
+      ok "New subscription URL is reachable"
+
+      # 2. Backup current config
+      sub_backup_config
+
+      # 3. Save new URL and generate config
+      info "Saving new subscription URL..."
+      echo "$url" > "$(sub_url_file)"
+      chown root:"$HIDDIFY_USER" "$(sub_url_file)"
+      chmod 640 "$(sub_url_file)"
+
+      proxy_direct_on
+
+      section "Generating config from new subscription"
+      rm -f "$(config_file)" 2>/dev/null || true
+      if ! generate_config "$url" 2>/dev/null; then
+        warn "Config generation failed — attempting rollback"
+        sub_restore_config
+        echo "$(cat "$(sub_url_file).bak" 2>/dev/null || echo "")" > "$(sub_url_file)"
+        proxy_direct_off
+        die "Subscription replacement failed — rolled back to previous config"
+      fi
+
+      # 4. Restart service
+      section "Restarting service"
+      proxy_direct_off
+      sleep 2
+
+      # 5. Verify connectivity
+      section "Verifying connectivity"
+      local proxy_ok=0
+      if curl -fsSL --max-time 10 --noproxy '*' --proxy http://127.0.0.1:$PORT_REDIR https://ifconfig.me >/dev/null 2>&1; then
+        proxy_ok=1
+      fi
+
+      if [[ $proxy_ok -eq 0 ]]; then
+        warn "New config may not be working — rolling back..."
+        sub_restore_config
+        proxy_direct_on
+        rm -f "$(config_file)" 2>/dev/null || true
+        generate_config "$(cat "$(sub_url_file).bak" 2>/dev/null || echo "")" 2>/dev/null || true
+        echo "$(cat "$(sub_url_file).bak" 2>/dev/null || echo "")" > "$(sub_url_file)"
+        proxy_direct_off
+        die "Subscription replacement failed connectivity check — rolled back"
+      fi
+
+      ok "Subscription replaced successfully"
+      cmd_test
+      ;;
+
+    help|*)
+      cat <<SUBEOF
+
+${BOLD}hcore subscription${NC}
+
+Usage: sudo hcore subscription [command|URL]
+
+Commands:
+  <URL>                     Replace primary subscription
+  --show                    Show current subscription and status
+  --test                    Test primary + fallback subscription URLs
+  --list                    List all configured subscriptions
+  --add-fallback <URL>      Add a fallback subscription URL
+  --remove-fallback <idx>   Remove fallback by index (1-based)
+
+Examples:
+  sudo hcore subscription "https://new-sub-url/..."
+  sudo hcore subscription --show
+  sudo hcore subscription --test
+  sudo hcore subscription --list
+  sudo hcore subscription --add-fallback "https://backup-sub/..."
+  sudo hcore subscription --remove-fallback 1
+
+SUBEOF
+      ;;
+  esac
+}
+
+# ─── direct-on / direct-off ────────────────────────────────────────────────
+cmd_direct_on() {
+  require_root
+  section "Entering direct network mode (proxy disabled)"
+  proxy_direct_on
+  ok "Proxy disabled — traffic going direct"
+  echo -e "  To re-enable: ${CYAN}sudo hcore direct-off${NC}"
+}
+
+cmd_direct_off() {
+  require_root
+  section "Re-enabling transparent proxy"
+  proxy_direct_off
+  sleep 2
+  systemctl is-active --quiet "$SERVICE_NAME" \
+    && ok "Proxy re-enabled" \
+    || warn "Service may not be running — check: journalctl -u ${SERVICE_NAME} -n 30"
+}
+
+# ─── health check ──────────────────────────────────────────────────────────
+cmd_health() {
+  section "Health check"
+
+  local score=0 total=0
+  local pass="pass" fail="fail"
+
+  check() {
+    total=$((total + 1))
+    local label="$1"
+    shift
+    if "$@" >/dev/null 2>&1; then
+      echo -e "  ${GREEN}✓${NC}  $label"
+      score=$((score + 1))
+    else
+      echo -e "  ${RED}✗${NC}  $label"
+    fi
+  }
+
+  check "Service running" systemctl is-active --quiet "$SERVICE_NAME"
+  check "iptables service running" systemctl is-active --quiet "${SERVICE_NAME}-iptables"
+  check "Redirect port $PORT_REDIR listening" ss -ltn | grep -q ":$PORT_REDIR "
+  check "DNS port $PORT_DNS listening" ss -ltn | grep -q ":$PORT_DNS "
+  check "OUTPUT -> HIDDIFY rule exists" iptables -t nat -S OUTPUT 2>/dev/null | grep -q -- "-A OUTPUT -p tcp -j HIDDIFY"
+  check "Config file exists" test -s "$(fixed_config)"
+  check "Subscription URL configured" test -f "$(sub_url_file)"
+
+  # Proxy IP != direct IP
+  local proxy_ip direct_ip
+  proxy_ip=$(curl -s --max-time 5 --proxy http://127.0.0.1:$PORT_REDIR https://ifconfig.me 2>/dev/null || echo "FAIL")
+  direct_ip=$(curl -s --max-time 5 --noproxy '*' https://ifconfig.me 2>/dev/null || echo "FAIL")
+  total=$((total + 1))
+  if [[ "$proxy_ip" != "FAIL" && "$proxy_ip" != "$direct_ip" && "$direct_ip" != "FAIL" ]]; then
+    echo -e "  ${GREEN}✓${NC}  Proxy IP differs from direct ($proxy_ip vs $direct_ip)"
+    score=$((score + 1))
+  else
+    echo -e "  ${RED}✗${NC}  Proxy IP check failed (proxy=$proxy_ip direct=$direct_ip)"
+  fi
+
+  # No recent errors
+  total=$((total + 1))
+  if [[ -f "$(log_file)" ]]; then
+    local recent_errors
+    recent_errors=$(tail -50 "$(log_file)" 2>/dev/null | grep -ci "error\|fail\|panic" || true)
+    if [[ "$recent_errors" -eq 0 ]]; then
+      echo -e "  ${GREEN}✓${NC}  No recent errors in log"
+      score=$((score + 1))
+    else
+      echo -e "  ${RED}✗${NC}  $recent_errors recent error(s) in log"
+    fi
+  else
+    echo -e "  ${YELLOW}?${NC}  Log file not found"
+  fi
+
+  echo ""
+  if [[ "$score" -eq "$total" ]]; then
+    ok "All $total checks passed — proxy is healthy"
+  else
+    warn "$score/$total checks passed"
+  fi
+}
+
+# ─── auto-update ──────────────────────────────────────────────────────────
+AUTO_UPDATE_SERVICE="hcore-auto-update"
+AUTO_UPDATE_TIMER="hcore-auto-update"
+AUTO_UPDATE_INTERVAL=6  # hours
+
+write_auto_update_timer() {
+  local script_path="${INSTALL_DIR}/hcore-auto-update.sh"
+
+  cat > "$script_path" <<'AUTOSCRIPT'
+#!/usr/bin/env bash
+# Auto-generated by install.sh — do not edit manually
+set -euo pipefail
+
+INSTALL_DIR="INSTALLDIR"
+LOG_FILE="${INSTALL_DIR}/hcore-auto-update.log"
+SUB_URL_FILE="${INSTALL_DIR}/subscription.url"
+CONFIG_FILE="${INSTALL_DIR}/data/current-config.json"
+FIXED_CONFIG="${INSTALL_DIR}/current-config.fixed.json"
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG_FILE"; }
+
+# Check if config is stale (>24h)
+config_age_hours() {
+  [[ -f "$CONFIG_FILE" ]] || echo 999
+  local mtime
+  mtime=$(stat -c %Y "$CONFIG_FILE" 2>/dev/null || echo 0)
+  echo $(( ($(date +%s) - mtime) / 3600 ))
+}
+
+age=$(config_age_hours)
+if [[ "$age" -lt 24 ]]; then
+  log "Config is fresh (${age}h) — skipping update"
+  exit 0
+fi
+
+log "Config is stale (${age}h) — attempting update"
+
+# Try to update (direct-on, regenerate, direct-off)
+"${INSTALL_DIR}/hcore" direct-on >> "$LOG_FILE" 2>&1 || true
+rm -f "$CONFIG_FILE" 2>/dev/null || true
+
+url=$(cat "$SUB_URL_FILE" 2>/dev/null || echo "")
+if [[ -z "$url" ]]; then
+  log "ERROR: No subscription URL found"
+  exit 1
+fi
+
+# Generate new config
+("${INSTALL_DIR}/hiddify-core" run -c "$url" >> "$LOG_FILE" 2>&1) || true
+
+if [[ -f "$CONFIG_FILE" ]]; then
+  # Patch config
+  python3 - "$CONFIG_FILE" "$FIXED_CONFIG" <<'PYEOF' >> "$LOG_FILE" 2>&1
+import json, sys
+src, dst = sys.argv[1], sys.argv[2]
+with open(src) as f: d = json.load(f)
+broken = {o.get("tag") for o in d.get("outbounds",[]) if isinstance(o,dict) and o.get("type")=="balancer" and not str(o.get("strategy","")).strip() and o.get("tag")}
+if broken:
+    d["outbounds"] = [o for o in d["outbounds"] if o.get("tag") not in broken]
+    for o in d.get("outbounds",[]):
+        if o.get("tag")=="select" and isinstance(o.get("outbounds",[]),list):
+            o["outbounds"] = [x for x in o["outbounds"] if x not in broken]
+    route = d.get("route") or {}
+    tags = [o.get("tag") for o in d["outbounds"] if o.get("tag")]
+    if route.get("final") in broken: route["final"] = tags[0] if tags else "direct"
+    for r in route.get("rules",[]):
+        if isinstance(r,dict) and r.get("outbound") in broken: r["outbound"] = route.get("final","direct")
+    d["route"] = route
+for o in d.get("outbounds",[]):
+    if isinstance(o,dict) and o.get("type")=="balancer" and not str(o.get("strategy","")).strip():
+        o["strategy"] = "lowest-delay"
+existing = {i.get("tag") for i in d.get("inbounds",[]) if isinstance(i,dict) and i.get("tag")}
+required = [
+    {"type":"mixed","tag":"mixed-in127.0.0.1","listen":"127.0.0.1","listen_port":12334},
+    {"type":"mixed","tag":"mixed-in::1","listen":"::1","listen_port":12334},
+    {"type":"redirect","tag":"redirect-in127.0.0.1","listen":"127.0.0.1","listen_port":12336},
+    {"type":"redirect","tag":"redirect-in::1","listen":"::1","listen_port":12336},
+    {"type":"direct","tag":"dns-in127.0.0.1","listen":"127.0.0.1","listen_port":12337},
+    {"type":"direct","tag":"dns-in::1","listen":"::1","listen_port":12337},
+]
+for ib in required:
+    if ib["tag"] not in existing: d.setdefault("inbounds",[]).append(ib)
+with open(dst,"w") as f: json.dump(d,f,ensure_ascii=False,indent=2)
+PYEOF
+
+  chown root:"HIDDIFYUSER" "$FIXED_CONFIG"
+  chmod 640 "$FIXED_CONFIG"
+  log "Config patched successfully"
+
+  "${INSTALL_DIR}/hcore" direct-off >> "$LOG_FILE" 2>&1 || true
+  log "Service restarted with new config"
+else
+  log "ERROR: Config generation failed"
+  "${INSTALL_DIR}/hcore" direct-off >> "$LOG_FILE" 2>&1 || true
+  exit 1
+fi
+AUTOSCRIPT
+
+  sed -i "s|INSTALLDIR|${INSTALL_DIR}|g; s|HIDDIFYUSER|${HIDDIFY_USER}|g" "$script_path"
+  chmod 755 "$script_path"
+  chown root:"$HIDDIFY_USER" "$script_path"
+}
+
+cmd_auto_update() {
+  require_root
+
+  local action=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --enable)  action="enable"; shift ;;
+      --disable) action="disable"; shift ;;
+      --status)  action="status"; shift ;;
+      --help|-h) action="help"; shift ;;
+      *) die "Unknown option: $1" ;;
+    esac
+  done
+
+  case "${action:-help}" in
+    help|*)
+      cat <<EOF
+
+${BOLD}hcore auto-update${NC}
+
+Usage: sudo hcore auto-update [option]
+
+Options:
+  --enable    Enable automatic subscription update (every ${AUTO_UPDATE_INTERVAL}h)
+  --disable   Disable automatic subscription update
+  --status    Show auto-update status
+
+When enabled, checks config age every ${AUTO_UPDATE_INTERVAL} hours.
+If config is older than 24h, automatically runs 'hcore update'.
+
+Logs: ${INSTALL_DIR}/hcore-auto-update.log
+
+EOF
+      return 0
+      ;;
+
+    enable)
+      section "Enabling auto-update"
+
+      write_auto_update_timer
+
+      # Write systemd timer
+      cat > "/etc/systemd/system/${AUTO_UPDATE_TIMER}.service" <<UNIT
+[Unit]
+Description=Hiddify auto-update subscription config
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${INSTALL_DIR}/hcore-auto-update.sh
+User=root
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+      cat > "/etc/systemd/system/${AUTO_UPDATE_TIMER}.timer" <<UNIT
+[Unit]
+Description=Hiddify auto-update timer (every ${AUTO_UPDATE_INTERVAL}h)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=${AUTO_UPDATE_INTERVAL}h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+      systemctl daemon-reload
+      systemctl enable --now "${AUTO_UPDATE_TIMER}.timer"
+
+      ok "Auto-update enabled (every ${AUTO_UPDATE_INTERVAL}h)"
+      echo -e "  Timer: ${CYAN}systemctl list-timers ${AUTO_UPDATE_TIMER}*${NC}"
+      echo -e "  Log:   ${CYAN}${INSTALL_DIR}/hcore-auto-update.log${NC}"
+      ;;
+
+    disable)
+      section "Disabling auto-update"
+      systemctl disable --now "${AUTO_UPDATE_TIMER}.timer" 2>/dev/null || true
+      rm -f "/etc/systemd/system/${AUTO_UPDATE_TIMER}.service"
+      rm -f "/etc/systemd/system/${AUTO_UPDATE_TIMER}.timer"
+      systemctl daemon-reload
+      ok "Auto-update disabled"
+      ;;
+
+    status)
+      section "Auto-update status"
+
+      if systemctl is-active --quiet "${AUTO_UPDATE_TIMER}.timer" 2>/dev/null; then
+        echo -e "  Status: ${GREEN}enabled${NC}"
+        systemctl list-timers "${AUTO_UPDATE_TIMER}*" --no-pager 2>/dev/null || true
+      else
+        echo -e "  Status: ${YELLOW}disabled${NC}"
+      fi
+
+      if [[ -f "${INSTALL_DIR}/hcore-auto-update.log" ]]; then
+        echo -e "\n  Last 5 entries:"
+        tail -5 "${INSTALL_DIR}/hcore-auto-update.log" 2>/dev/null | sed 's/^/    /'
+      else
+        echo -e "  ${YELLOW}No log yet${NC}"
+      fi
+
+      if [[ -f "$(config_file)" ]]; then
+        local config_age
+        config_age=$(( ($(date +%s) - $(stat -c %Y "$(config_file)" 2>/dev/null || echo 0)) / 3600 ))
+        echo -e "\n  Config age: ${config_age}h"
+        if [[ "$config_age" -lt 24 ]]; then
+          echo -e "  Auto-update would: ${GREEN}skip${NC} (fresh)"
+        else
+          echo -e "  Auto-update would: ${RED}update${NC} (stale)"
+        fi
+      fi
+      ;;
+  esac
+}
+
 # ─── rollback on failure ─────────────────────────────────────────────────────
 rollback_install() {
   local exit_code=$?
@@ -965,6 +1605,9 @@ cmd_uninstall() {
   rm -f /usr/local/sbin/hcore
   rm -f "${INSTALL_DIR}/hcore-iptables.sh"
   rm -f "${INSTALL_DIR}/hcore"
+  rm -f "${INSTALL_DIR}/subscription.url"
+  rm -f "${INSTALL_DIR}/subscription.fallback"
+  rm -f "$(fixed_config).bak"
   rm -rf "$INSTALL_DIR"
   rm -f "$(lock_file)"
 
@@ -986,6 +1629,7 @@ cmd_uninstall() {
 }
 
 cmd_status() {
+  require_root
   section "Summary"
 
   local service_state ipt_state config_state profile_state cli_state
@@ -1048,6 +1692,11 @@ cmd_status() {
     fi
   else
     echo -e "  ${YELLOW}No subscription configured${NC}"
+  fi
+  local fb_count
+  fb_count=$(fallback_list | grep -c . || echo 0)
+  if [[ "$fb_count" -gt 0 ]]; then
+    echo -e "  Fallback URLs: ${CYAN}${fb_count}${NC}"
   fi
 
   section "External IP"
@@ -1155,6 +1804,16 @@ Commands:
   install --subscription-url <URL> [--install-dir <DIR>]
                     Full install: download binary, generate config,
                     setup iptables, systemd service
+  subscription <URL>             Replace subscription (with backup/rollback)
+  subscription --show            Show current subscription status
+  subscription --test            Test subscription URL accessibility
+  subscription --list            List primary + fallback subscriptions
+  subscription --add-fallback <URL>     Add a fallback subscription
+  subscription --remove-fallback <idx>  Remove fallback by index
+  direct-on         Stop proxy, remove iptables, direct access
+  direct-off        Start proxy, restore iptables rules
+  health            Run health checks on proxy components
+  auto-update       Manage automatic subscription update
   update            Re-fetch subscription, re-patch config, restart
   upgrade           Download latest binary from GitHub, restart
   uninstall         Remove everything (service, rules, files, user)
@@ -1167,9 +1826,18 @@ Options:
 
 Examples:
   sudo $0 install --subscription-url "https://sub.example.com/..."
-  sudo $0 update
-  sudo $0 upgrade
-  sudo $0 status
+  sudo hcore subscription "https://new-sub-url/..."
+  sudo hcore subscription --show
+  sudo hcore subscription --test
+  sudo hcore subscription --add-fallback "https://backup-sub/..."
+  sudo hcore direct-on
+  sudo hcore direct-off
+  sudo hcore health
+  sudo hcore auto-update --enable
+  sudo hcore auto-update --status
+  sudo hcore update
+  sudo hcore upgrade
+  sudo hcore status
   sudo hcore test
   sudo hcore uninstall
 
@@ -1183,12 +1851,17 @@ main() {
   [[ -n "$cmd" && "$cmd" != "--help" && "$cmd" != "-h" ]] && acquire_lock "$cmd"
 
   case "$cmd" in
-    install)   cmd_install "$@" ;;
-    update)    cmd_update ;;
-    upgrade)   cmd_upgrade ;;
-    uninstall) cmd_uninstall ;;
-    status)    cmd_status ;;
-    test)      cmd_test ;;
+    install)      cmd_install "$@" ;;
+    subscription) cmd_subscription "$@" ;;
+    direct-on)    cmd_direct_on ;;
+    direct-off)   cmd_direct_off ;;
+    health)       cmd_health ;;
+    auto-update)  cmd_auto_update "$@" ;;
+    update)       cmd_update ;;
+    upgrade)      cmd_upgrade ;;
+    uninstall)    cmd_uninstall ;;
+    status)       cmd_status ;;
+    test)         cmd_test ;;
     ""|--help|-h) usage; exit 0 ;;
     *) die "Unknown command: $cmd. Run '$0 --help' for usage." ;;
   esac

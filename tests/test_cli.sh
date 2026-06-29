@@ -175,6 +175,26 @@ if [[ $EUID -eq 0 ]]; then
   assert_exit_code 1 "$rc" "--remove-fallback without index exits 1"
 fi
 
+# ─── auto-update (needs root) ─────────────────────────────────────────────
+section "auto-update (requires root)"
+
+if [[ $EUID -eq 0 ]]; then
+  output=$(bash "$INSTALL_SH" auto-update --help 2>&1) && rc=$? || rc=$?
+  assert_exit_code 0 "$rc" "auto-update --help exits 0"
+  assert_contains "$output" "enable" "auto-update help mentions --enable"
+  assert_contains "$output" "disable" "auto-update help mentions --disable"
+  assert_contains "$output" "status" "auto-update help mentions --status"
+
+  output=$(bash "$INSTALL_SH" auto-update --status 2>&1) && rc=$? || rc=$?
+  assert_exit_code 0 "$rc" "auto-update --status exits 0"
+else
+  output=$(bash "$INSTALL_SH" auto-update --enable 2>&1) && rc=$? || rc=$?
+  assert_exit_code 1 "$rc" "auto-update --enable exits 1 without root"
+
+  output=$(bash "$INSTALL_SH" auto-update --status 2>&1) && rc=$? || rc=$?
+  assert_exit_code 1 "$rc" "auto-update --status exits 1 without root"
+fi
+
 # ─── subscription --show (needs root) ──────────────────────────────────────
 section "subscription --show (requires root)"
 

@@ -149,7 +149,103 @@ config_file()  { echo "${INSTALL_DIR}/data/current-config.json"; }
 fixed_config() { echo "${INSTALL_DIR}/current-config.fixed.json"; }
 sub_url_file()     { echo "${INSTALL_DIR}/subscription.url"; }
 sub_fallback_file() { echo "${INSTALL_DIR}/subscription.fallback"; }
+panel_url_file()   { echo "${INSTALL_DIR}/panel.url"; }
+panel_token_file() { echo "${INSTALL_DIR}/panel.token"; }
 log_file()         { echo "${INSTALL_DIR}/hiddify-core.log"; }
+
+# Extract subscription ID from URL path (last segment)
+sub_extract_id() {
+  local url="$1"
+  local id
+  id=$(echo "$url" | awk -F/ '{print $NF}' | sed 's/[?].*//')
+  echo "$id"
+}
+
+# Query 3x-ui panel API for client info
+# Usage: panel_query <sub_id>
+panel_query() {
+  local sub_id="$1"
+  local panel_url token api_url
+
+  [[ -f "$(panel_url_file)" ]] || { warn "Panel URL not configured"; return 1; }
+  [[ -f "$(panel_token_file)" ]] || { warn "Panel token not configured"; return 1; }
+
+  panel_url=$(cat "$(panel_url_file)")
+  token=$(cat "$(panel_token_file)")
+
+  # Try 3x-ui API: /client/{sub_id} with Bearer token
+  api_url="${panel_url}/client/${sub_id}"
+  local response
+  response=$(curl -fsSL --max-time 10 --noproxy '*' \
+    -H "Authorization: Bearer $token" \
+    "$api_url" 2>/dev/null) || return 1
+
+  # Parse HTML response — extract key/value pairs
+  python3 - "$response" <<'PYEOF'
+import sys, re, json
+
+html = sys.stdin.read()
+
+# Try JSON first (some 3x-ui versions return JSON)
+try:
+    data = json.loads(html)
+    if isinstance(data, dict):
+        info = data.get("obj", data)
+        fields = {
+            "id": info.get("id", ""),
+            "status": info.get("status", ""),
+            "up": info.get("up", 0),
+            "down": info.get("down", 0),
+            "total": info.get("total", 0),
+            "expire": info.get("expire", 0),
+            "last_online": info.get("lastOnline", ""),
+            "username": info.get("username", info.get("email", "")),
+            "enable": info.get("enable", True),
+            "remark": info.get("remark", ""),
+        }
+        print(json.dumps(fields))
+        sys.exit(0)
+except (json.JSONDecodeError, KeyError):
+    pass
+
+# Parse HTML table rows
+fields = {}
+# Extract rows like <td>Label</td><td>Value</td>
+rows = re.findall(r'<td[^>]*>(.*?)</td>\s*<td[^>]*>(.*?)</td>', html, re.DOTALL)
+for label, value in rows:
+    label = re.sub(r'<[^>]+>', '', label).strip().lower()
+    value = re.sub(r'<[^>]+>', '', value).strip()
+    if 'id' in label and 'подписк' in label: fields['id'] = value
+    elif 'статус' in label: fields['status'] = value
+    elif 'загружено' in label or 'download' in label: fields['down'] = value
+    elif 'отправлено' in label or 'upload' in label: fields['up'] = value
+    elif 'использование' in label or 'total' in label: fields['usage'] = value
+    elif 'лимит' in label: fields['limit'] = value
+    elif 'сети' in label or 'online' in label: fields['last_online'] = value
+    elif 'срок' in label or 'expir' in label: fields['expire'] = value
+
+# Also try div-based layout (3x-ui subscription page)
+if not fields:
+    labels = re.findall(r'<div[^>]*class="[^"]*label[^"]*"[^>]*>(.*?)</div>', html, re.DOTALL)
+    values = re.findall(r'<div[^>]*class="[^"]*value[^"]*"[^>]*>(.*?)</div>', html, re.DOTALL)
+    for l, v in zip(labels, values):
+        l = re.sub(r'<[^>]+>', '', l).strip().lower()
+        v = re.sub(r'<[^>]+>', '', v).strip()
+        if 'id' in l: fields['id'] = v
+        elif 'статус' in l: fields['status'] = v
+        elif 'загружено' in l: fields['down'] = v
+        elif 'отправлено' in l: fields['up'] = v
+        elif 'использование' in l: fields['usage'] = v
+        elif 'лимит' in l: fields['limit'] = v
+        elif 'сети' in l: fields['last_online'] = v
+        elif 'срок' in l: fields['expire'] = v
+
+if fields:
+    print(json.dumps(fields))
+else:
+    sys.exit(1)
+PYEOF
+}
 
 setup_dirs() {
   mkdir -p "${INSTALL_DIR}" "$(data_dir)"
@@ -799,6 +895,8 @@ cmd_subscription() {
         action="add-fallback"; url="$2"; shift 2 ;;
       --remove-fallback)
         action="remove-fallback"; url="$2"; shift 2 ;;
+      --set-panel)
+        action="set-panel"; url="$2 $3"; shift 3 ;;
       --help|-h)
         action="help"; shift ;;
       -*)
@@ -829,6 +927,7 @@ Commands:
   --list                    List all configured subscriptions
   --add-fallback <URL>      Add a fallback subscription URL
   --remove-fallback <idx>   Remove fallback by index (1-based)
+  --set-panel <URL> <TOKEN> Configure 3x-ui panel for info display
 
 Examples:
   sudo hcore subscription "https://new-sub-url/..."
@@ -837,6 +936,7 @@ Examples:
   sudo hcore subscription --list
   sudo hcore subscription --add-fallback "https://backup-sub/..."
   sudo hcore subscription --remove-fallback 1
+  sudo hcore subscription --set-panel "https://panel.example.com" "your-api-token"
 
 SUBEOF
       return 0
@@ -860,6 +960,61 @@ SUBEOF
         fi
       else
         echo -e "  ${YELLOW}No subscription configured${NC}"
+      fi
+
+      # Query panel API if configured
+      if [[ -f "$(sub_url_file)" && -f "$(panel_url_file)" && -f "$(panel_token_file)" ]]; then
+        local sub_id panel_info
+        sub_id=$(sub_extract_id "$(cat "$(sub_url_file)")")
+        panel_info=$(panel_query "$sub_id" 2>/dev/null || echo "")
+        if [[ -n "$panel_info" ]]; then
+          section "Panel info"
+          python3 - "$panel_info" <<'PYEOF'
+import sys, json
+data = json.loads(sys.stdin.read())
+
+def fmt_bytes(b):
+    b = int(b) if b else 0
+    if b == 0: return "0 B"
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if b < 1024: return f"{b:.2f} {unit}"
+        b /= 1024
+    return f"{b:.2f} PB"
+
+def fmt_expire(ts):
+    if not ts or int(ts) == 0: return "Never"
+    from datetime import datetime
+    try:
+        return datetime.fromtimestamp(int(ts)).strftime("%d.%m.%Y, %H:%M:%S")
+    except: return str(ts)
+
+fields = data
+up = fields.get("up", 0)
+down = fields.get("down", 0)
+usage = fields.get("usage", "")
+limit = fields.get("limit", "")
+last_online = fields.get("last_online", "")
+expire = fields.get("expire", "")
+status = fields.get("status", "")
+enable = fields.get("enable", True)
+
+print(f"  ID:       {fields.get('id', 'N/A')}")
+print(f"  Status:   {status or ('Active' if enable else 'Disabled')}")
+print(f"  Uploaded: {fmt_bytes(up)}")
+print(f"  Downloaded: {fmt_bytes(down)}")
+if usage:
+    print(f"  Usage:    {usage}")
+else:
+    print(f"  Usage:    {fmt_bytes(int(up) + int(down))}")
+print(f"  Limit:    {limit or 'Unlimited'}")
+if last_online:
+    print(f"  Last seen: {last_online}")
+print(f"  Expires:  {fmt_expire(expire)}")
+PYEOF
+        fi
+      elif [[ -f "$(sub_url_file)" ]]; then
+        echo -e "\n  ${YELLOW}Panel not configured — run:${NC}"
+        echo -e "  sudo hcore subscription --set-panel <URL> <TOKEN>"
       fi
       ;;
 
@@ -926,6 +1081,21 @@ SUBEOF
       [[ -n "$url" ]] || die "Usage: hcore subscription --remove-fallback <index>"
       section "Removing fallback subscription"
       fallback_remove "$url"
+      ;;
+
+    set-panel)
+      local panel_url panel_token
+      panel_url=$(echo "$url" | awk '{print $1}')
+      panel_token=$(echo "$url" | awk '{print $2}')
+      [[ -n "$panel_url" ]] || die "Usage: hcore subscription --set-panel <URL> <TOKEN>"
+      [[ -n "$panel_token" ]] || die "Usage: hcore subscription --set-panel <URL> <TOKEN>"
+      # Strip trailing slash
+      panel_url="${panel_url%/}"
+      echo "$panel_url" > "$(panel_url_file)"
+      echo "$panel_token" > "$(panel_token_file)"
+      chown root:"$HIDDIFY_USER" "$(panel_url_file)" "$(panel_token_file)"
+      chmod 640 "$(panel_url_file)" "$(panel_token_file)"
+      ok "Panel configured: $panel_url"
       ;;
 
     set)
@@ -1003,6 +1173,7 @@ Commands:
   --list                    List all configured subscriptions
   --add-fallback <URL>      Add a fallback subscription URL
   --remove-fallback <idx>   Remove fallback by index (1-based)
+  --set-panel <URL> <TOKEN> Configure 3x-ui panel for info display
 
 Examples:
   sudo hcore subscription "https://new-sub-url/..."
@@ -1011,6 +1182,7 @@ Examples:
   sudo hcore subscription --list
   sudo hcore subscription --add-fallback "https://backup-sub/..."
   sudo hcore subscription --remove-fallback 1
+  sudo hcore subscription --set-panel "https://panel.example.com" "your-api-token"
 
 SUBEOF
       ;;
@@ -1848,6 +2020,7 @@ Commands:
   subscription --list            List primary + fallback subscriptions
   subscription --add-fallback <URL>     Add a fallback subscription
   subscription --remove-fallback <idx>  Remove fallback by index
+  subscription --set-panel <URL> <TOKEN> Configure 3x-ui panel
   direct-on         Stop proxy, remove iptables, direct access
   direct-off        Start proxy, restore iptables rules
   health            Run health checks on proxy components

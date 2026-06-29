@@ -1,6 +1,31 @@
 # Changelog
 
-## Unreleased
+## 2026-06-29
+
+### Added
+- Pre-flight network validation: DNS resolution, internet connectivity, subscription URL reachability, upstream server resolution
+- Rollback mechanism: automatic cleanup on installation failure
+- Post-install connectivity verification: tests proxy connection after install
+- Connection check section in `status` command: shows proxy IP vs direct IP
+- Subscription status display in `status` command: shows masked URL and config age
+- `diagnose.sh` for safe subscription testing without enabling proxy
+- `check-connection.sh` for connection diagnostics
+- DNS UID bypass: hiddify-svc DNS queries bypass redirect to prevent DNS loop
+
+### Fixed
+- DNS loop: hiddify-core could not resolve upstream server because DNS queries were redirected through itself. Fixed by adding UID-based RETURN rules in OUTPUT chain before DNS REDIRECT rules
+- Lock file permission error: changed LOCK_DIR from `/run/lock` to `/tmp` for reliable permissions
+- `lf: unbound variable` error in lock trap: changed from local variable to global `_HCORE_LOCK_FILE`
+- `cache.db: permission denied`: added ownership fix in `setup_dirs()` for existing cache files
+- Uninstall: removed duplicate `/etc/profile.d/hiddify-proxy.sh` cleanup, added lock file cleanup, added post-uninstall verification
+- install.sh now cleans stale iptables rules from previous installations before config generation
+
+### Changed
+- Better error messages for network failures during installation
+- `status` command now shows subscription URL (masked), config age, and proxy connectivity
+- `test` command output includes connection status
+
+## Unreleased (from previous work)
 
 ### Added
 - Добавлен `CHECKLIST.md` для пошаговой безопасной доработки и стендового тестирования.
@@ -25,6 +50,3 @@
 - Исправлен wrapper `hcore`, чтобы корректно прокидывались аргументы `"$@"`.
 - Исправлен false-negative на пути `upgrade`, когда версия уже latest и proxy test запускался слишком рано после возврата proxy state.
 - Исправлен recovery path для partial old install, чтобы reinstall не оставлял stale transparent proxy state без рабочего сервиса.
-
-### Notes
-- В логах `hiddify-core` всё ещё возможны шумные upstream monitoring warnings по DNS/IP-info under working proxy state. Это отмечено как follow-up, но не считается blocker для merge.

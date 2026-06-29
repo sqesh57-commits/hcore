@@ -35,13 +35,13 @@
 
 ## Phase 2. Direct network mode for update/upgrade
 
-- [ ] Добавить `proxy_env_unset()`
+- [x] Добавить `proxy_env_unset()`
 - [x] Определить канонический способ выключения proxy state
 - [x] Определить канонический способ включения proxy state
 - [x] Переписать `cmd_update()` на safe direct mode
 - [x] Переписать `cmd_upgrade()` на safe direct mode
 - [x] Проверить, что после update сервис поднимается и трафик снова идёт через proxy
-- [ ] Проверить, что после upgrade сервис поднимается и трафик снова идёт через proxy
+- [x] Проверить, что после upgrade сервис поднимается и трафик снова идёт через proxy
 
 ## Phase 3. Backup and rollback
 
@@ -72,6 +72,19 @@
 - [x] Улучшить `status` так, чтобы было видно текущий режим и ключевые проблемы
 - [x] Улучшить `test` дополнительными sanity checks
 - [ ] Подумать над `direct-on` / `direct-off` только после стабилизации базовой логики
+
+## Phase 7. DNS loop fix and safety checks
+
+- [x] Исправить DNS loop: UID-based RETURN rules для DNS в OUTPUT chain
+- [x] Добавить pre-flight network validation (DNS, internet, subscription URL, upstream server)
+- [x] Добавить rollback mechanism при ошибке установки
+- [x] Добавить post-install connectivity check
+- [x] Исправить lock file permission error (LOCK_DIR → /tmp)
+- [x] Исправить `lf: unbound variable` error (global variable)
+- [x] Исправить `cache.db: permission denied` (ownership fix)
+- [x] Добавить connection check и subscription status в `cmd_status()`
+- [x] Создать `diagnose.sh` для безопасного тестирования подписок
+- [x] Создать `check-connection.sh` для диагностики соединения
 
 ## Предмерджевое расширенное тестирование
 

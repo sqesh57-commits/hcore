@@ -10,12 +10,15 @@ Bash-скрипт для автоматической установки [hiddif
 - Генерация конфига из subscription URL с автоматическим патчем [бага балансера](https://github.com/hiddify/hiddify-app/issues/2104)
 - Перехват **всего** TCP-трафика через `iptables` (без изменения настроек приложений)
 - Перехват DNS для предотвращения утечек
+- **Pre-flight проверки сети**: DNS, интернет, доступность подписки, резолвинг upstream сервера
+- **Автоматический rollback** при ошибке установки — сервер не останется без связи
+- **Проверка подключения** после установки — убеждаемся что proxy работает
 - Изолированный системный пользователь `hiddify-svc` — процесс не работает от root
 - Автозапуск через `systemd`
 - Сохранение правил `iptables` через `netfilter-persistent`
 - Поддержка IPv6 (если есть публичный адрес)
 - Команды `update` (новая подписка) и `upgrade` (новый бинарь)
-- Полное удаление через `uninstall`
+- Полное удаление через `uninstall` с верификацией
 
 ## Поддерживаемые платформы
 
@@ -56,12 +59,18 @@ sudo hcore test
 
 ## Команды
 
-> Текущая первая волна доработок затрагивает только надёжность скачивания бинаря. Логика proxy, iptables и lifecycle сервиса в этом шаге не меняется.
-
 ```bash
 sudo ./install.sh install --subscription-url <URL> [--install-dir <DIR>]
 ```
 Полная установка с нуля. Скачивает бинарь, генерирует конфиг, настраивает iptables и systemd.
+
+**Pre-flight проверки перед установкой:**
+- DNS резолвинг
+- Интернет-соединение
+- Доступность subscription URL
+- Резолвинг upstream сервера
+
+При ошибке установки автоматически выполняется rollback — сервер возвращается в исходное состояние.
 
 ```bash
 sudo ./install.sh update
@@ -73,31 +82,26 @@ sudo ./install.sh upgrade
 ```
 Обновить бинарь `hiddify-core` до последней версии с GitHub Releases.
 
-Во время `upgrade` скрипт временно выходит в direct mode, чтобы GitHub API и Releases не зависели от уже включённого transparent proxy.
-
-Скачивание бинаря теперь идёт безопаснее:
-- с retry при временных сбоях,
-- с resume для частично скачанного файла,
-- с ограничением по времени,
-- через временный `.part` файл,
-- с проверкой, что результат не пустой, перед заменой итогового архива.
-
 ```bash
 sudo ./install.sh status
 sudo hcore status
 ```
-Показывает summary по runtime state, состояние сервиса, порты, правила iptables и текущий внешний IP.
+Показывает:
+- Состояние сервиса и iptables
+- Subscription URL (маскированный) и возраст конфига
+- Порты и правила iptables
+- **Connection check**: proxy IP vs direct IP, ошибки в логе
 
 ```bash
 sudo ./install.sh test
 sudo hcore test
 ```
-Проверяет что трафик идёт через прокси тремя способами: через env, через iptables redirect, от пользователя nobody, и дополнительно делает sanity checks по service state, listening redirect port и наличию OUTPUT → HIDDIFY.
+Проверяет что трафик идёт через прокси тремя способами: через env, через iptables redirect, от пользователя nobody.
 
 ```bash
 sudo ./install.sh uninstall
 ```
-Полное удаление: сервис, бинарь, конфиги, пользователь, proxy env profile, helper script и правила iptables с пересохранением очищенного persistent state.
+Полное удаление: сервис, бинарь, конфиги, пользователь, proxy env profile, helper script и правила iptables с пересохранением очищенного persistent state. Включает верификацию после удаления.
 
 ## Опции установки
 
@@ -205,11 +209,32 @@ systemctl restart hiddify
 systemctl stop hiddify
 ```
 
+## Диагностика
+
+Если proxy не работает после установки:
+
+```bash
+# Проверить connection status
+sudo hcore status
+
+# Проверить логи
+journalctl -u hiddify -n 50
+
+# Запустить diagnostic script
+curl -fsSL https://raw.githubusercontent.com/sqesh57-commits/hcore/main/diagnose.sh -o diagnose.sh
+sudo bash diagnose.sh --url "https://your-subscription-url/..."
+
+# Проверить connection
+curl -fsSL https://raw.githubusercontent.com/sqesh57-commits/hcore/main/check-connection.sh -o check-connection.sh
+sudo bash check-connection.sh
+```
+
 ## Известные ограничения
 
 - **UDP трафик** (кроме DNS) не перехватывается через `iptables REDIRECT` — только TCP. Для полного UDP-перехвата нужен TUN-режим hiddify-core, что требует отдельной настройки.
 - **IPv6**: правила добавляются только если на интерфейсе есть публичный IPv6 адрес (`scope global`). Link-local (`fe80::`) не считается.
 - **Docker**: контейнеры с собственными network namespace не затрагиваются правилами `OUTPUT` — только трафик хоста. Для проксирования docker-трафика нужны правила в цепочке `FORWARD`.
+- **DNS loop**: решён — hiddify-svc DNS queries bypass redirect через UID-based RETURN rules в OUTPUT chain.
 
 ## Требования
 

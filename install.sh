@@ -29,7 +29,7 @@ SERVICE_NAME="hiddify"
 SUBSCRIPTION_URL=""
 GITHUB_REPO="hiddify/hiddify-core"
 GITHUB_API="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
-LOCK_DIR="/run/lock"
+LOCK_DIR="/tmp"
 
 # ports (must match inbounds in generated config)
 PORT_MIXED=12334
@@ -51,13 +51,16 @@ lock_file() {
 
 acquire_lock() {
   mkdir -p "$LOCK_DIR"
-  exec 9>"$(lock_file)"
+  local lf
+  lf=$(lock_file)
+  exec 9>"$lf"
   if ! flock -n 9; then
     local holder
-    holder=$(cat "$(lock_file)" 2>/dev/null || true)
+    holder=$(cat "$lf" 2>/dev/null || true)
     die "Another hcore operation is already running${holder:+: $holder}"
   fi
-  echo "pid=$$ cmd=${1:-unknown}" > "$(lock_file)"
+  echo "pid=$$ cmd=${1:-unknown}" > "$lf"
+  trap 'rm -f "$lf"' EXIT
 }
 
 install_deps() {
@@ -896,6 +899,39 @@ cmd_status() {
   section "External IP"
   curl -s --max-time 5 --noproxy '*' -4 https://ifconfig.me 2>/dev/null \
     && echo " (IPv4)" || echo "IPv4: timeout"
+
+  section "Connection check"
+
+  if ss -ltn 2>/dev/null | grep -q ":$PORT_REDIR "; then
+    echo -e "  ${GREEN}✓${NC}  Redirect port $PORT_REDIR accepting connections"
+  else
+    echo -e "  ${RED}✗${NC}  Redirect port $PORT_REDIR not listening"
+  fi
+
+  local proxy_ip direct_ip
+  proxy_ip=$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null || echo "FAIL")
+  direct_ip=$(curl -s --max-time 5 --noproxy '*' https://ifconfig.me 2>/dev/null || echo "FAIL")
+
+  if [[ "$proxy_ip" == "FAIL" ]]; then
+    echo -e "  ${RED}✗${NC}  Proxy connection: ${RED}FAILED${NC}"
+  elif [[ "$proxy_ip" == "$direct_ip" ]]; then
+    echo -e "  ${YELLOW}?${NC}  Proxy IP same as direct ($proxy_ip) — proxy may not be working"
+  else
+    echo -e "  ${GREEN}✓${NC}  Proxy IP: $proxy_ip (direct: $direct_ip)"
+  fi
+
+  if [[ -f "$(log_file)" ]]; then
+    local recent_errors
+    recent_errors=$(tail -20 "$(log_file)" 2>/dev/null | grep -ci "error\|fail\|panic" || true)
+    if [[ "$recent_errors" -gt 0 ]]; then
+      echo -e "  ${YELLOW}?${NC}  Recent errors in log: $recent_errors"
+      tail -5 "$(log_file)" 2>/dev/null | sed 's/^/    /'
+    else
+      echo -e "  ${GREEN}✓${NC}  No recent errors in log"
+    fi
+  else
+    echo -e "  ${YELLOW}?${NC}  Log file not found"
+  fi
 }
 
 cmd_test() {

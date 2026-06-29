@@ -49,18 +49,19 @@ lock_file() {
   echo "${LOCK_DIR}/hcore.lock"
 }
 
+_HCORE_LOCK_FILE=""
+
 acquire_lock() {
   mkdir -p "$LOCK_DIR"
-  local lf
-  lf=$(lock_file)
-  exec 9>"$lf"
+  _HCORE_LOCK_FILE=$(lock_file)
+  exec 9>"$_HCORE_LOCK_FILE"
   if ! flock -n 9; then
     local holder
-    holder=$(cat "$lf" 2>/dev/null || true)
+    holder=$(cat "$_HCORE_LOCK_FILE" 2>/dev/null || true)
     die "Another hcore operation is already running${holder:+: $holder}"
   fi
-  echo "pid=$$ cmd=${1:-unknown}" > "$lf"
-  trap 'rm -f "$lf"' EXIT
+  echo "pid=$$ cmd=${1:-unknown}" > "$_HCORE_LOCK_FILE"
+  trap 'rm -f "$_HCORE_LOCK_FILE"' EXIT
 }
 
 install_deps() {
@@ -895,6 +896,29 @@ cmd_status() {
   [[ -f "${INSTALL_DIR}/version.txt" ]] \
     && cat "${INSTALL_DIR}/version.txt" || echo "Unknown"
   "${INSTALL_DIR}/${BINARY_NAME}" version 2>/dev/null || true
+
+  section "Subscription"
+  if [[ -f "$(sub_url_file)" ]]; then
+    local sub_url sub_display
+    sub_url=$(cat "$(sub_url_file)")
+    # Mask the secret part of URL for security
+    sub_display=$(echo "$sub_url" | sed -E 's|(/[^/]{4})[^/]*(/\?|$)|\1****\2|; s|(\?secret=)[^&]*|\1****|')
+    echo -e "  URL: ${CYAN}${sub_display}${NC}"
+    # Check if config is fresh (modified within last 24h)
+    if [[ -f "$(config_file)" ]]; then
+      local config_age
+      config_age=$(( ($(date +%s) - $(stat -c %Y "$(config_file)" 2>/dev/null || echo 0)) / 3600 ))
+      if [[ "$config_age" -lt 24 ]]; then
+        echo -e "  Config age: ${GREEN}${config_age}h${NC} (fresh)"
+      elif [[ "$config_age" -lt 168 ]]; then
+        echo -e "  Config age: ${YELLOW}${config_age}h${NC} (may need update)"
+      else
+        echo -e "  Config age: ${RED}${config_age}h${NC} (stale — run 'hcore update')"
+      fi
+    fi
+  else
+    echo -e "  ${YELLOW}No subscription configured${NC}"
+  fi
 
   section "External IP"
   curl -s --max-time 5 --noproxy '*' -4 https://ifconfig.me 2>/dev/null \

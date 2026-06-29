@@ -1,5 +1,29 @@
 # Roadmap: hcore доработки
 
+## Сравнение с hiddify-core
+
+### Что уже есть в hiddify-core (НЕ дублировать):
+- Multi-protocol support (VLESS, VMess, Trojan, Shadowsocks, WireGuard, etc.)
+- Cross-platform (Android, macOS, Linux, Windows, iOS)
+- Extension system
+- Docker support
+- OpenWrt support
+- **Web UI** (порт 6756) — НЕ дублировать
+- Subscription support (`run -c URL`)
+- Свой installer.sh (простая установка бинаря)
+
+### Наша ценность (ЧТО ДЕЛАЕМ):
+- **Transparent proxy** — iptables rules для перехвата всего трафика
+- **DNS leak prevention** — перехват DNS запросов
+- **Process isolation** — hiddify-svc пользователь
+- **Safety checks** — pre-flight проверки, rollback при ошибке
+- **Subscription management** — замена, fallback, backup
+- **CLI wrapper** — все команды через `hcore`
+- **Health monitoring** — watchdog для proxy
+- **Auto-update** — автоматическое обновление подписки
+
+---
+
 ## Приоритет P0 — Критично
 
 ### 1. Замена подписки (`hcore subscription`)
@@ -69,13 +93,11 @@ hcore subscription --test              # тест подписки
 hcore direct-on                        # выключить proxy
 hcore direct-off                       # включить proxy
 hcore logs                             # показать логи
-hcore config                           # показать конфиг
 ```
 
 **Реализация:**
 - CLI wrapper копируется при установке
 - Все команды делегируются в install.sh с соответствующими аргументами
-- Добавить tab-completion для bash
 
 ## Приоритет P1 — Важно
 
@@ -93,7 +115,6 @@ hcore direct-off   # запустить proxy, вернуть iptables
 **Логика:**
 - `direct-on`: stop hiddify service, stop hiddify-iptables, unset proxy env
 - `direct-off`: start hiddify-iptables, start hiddify service
-- Сохранять состояние для восстановления
 
 ### 5. Мониторинг здоровья proxy
 
@@ -103,7 +124,6 @@ hcore direct-off   # запустить proxy, вернуть iptables
 
 ```bash
 hcore health       # проверить здоровье proxy
-hcore watch        # мониторинг в реальном времени
 ```
 
 **Проверки:**
@@ -132,21 +152,7 @@ hcore auto-update --status   # статус
 
 ## Приоритет P2 — Желательно
 
-### 7. Web UI
-
-**Идея:** Минимальный веб-интерфейс для управления:
-
-- Просмотр статуса
-- Замена подписки
-- Просмотр логов
-- Включение/выключение proxy
-
-**Реализация:**
-- Python/Go сервер на порту 8080
-- Простой HTML/CSS/JS фронтенд
-- Auth через пароль или token
-
-### 8. Мульти-сервер поддержка
+### 7. Мульти-сервер поддержка
 
 **Идея:** Управлять несколькими серверами через один CLI:
 
@@ -156,7 +162,7 @@ hcore remote status server1
 hcore remote update server1 --subscription-url <URL>
 ```
 
-### 9. Статистика трафика
+### 8. Статистика трафика
 
 **Идея:** Собирать и показывать статистику:
 
@@ -171,52 +177,24 @@ hcore stats --week # за неделю
 - Время работы
 - Ошибки
 
-## Приоритет P3 — Идеи
-
-### 10. WireGuard over VLESS
-
-**Идея:** Использовать VLESS как транспорт для WireGuard:
-
-- Более стабильное соединение
-- Поддержка UDP
-- Лучшая производительность
-
-### 11. Load balancing
-
-**Идея:** Распределять трафик между несколькими серверами:
-
-```bash
-hcore balance add server1 server2 server3
-hcore balance status
-```
-
-### 12. Docker интеграция
-
-**Идея:** Проксировать трафик Docker контейнеров:
-
-```bash
-hcore docker enable    # включить proxy для Docker
-hcore docker disable   # выключить
-```
-
 ---
 
 ## Текущий статус
 
-| Функция | Статус | Приоритет |
-|---------|--------|-----------|
-| Установка | ✅ Готово | P0 |
-| Update/Upgrade | ✅ Готово | P0 |
-| Status/Test | ✅ Готово | P0 |
-| Uninstall | ✅ Готово | P0 |
-| DNS loop fix | ✅ Готово | P0 |
-| Safety checks | ✅ Готово | P0 |
-| Замена подписки | 🔲 Не начато | P0 |
-| Fallback подписки | 🔲 Не начато | P0 |
-| CLI wrapper | 🔲 Частично | P0 |
-| direct-on/off | 🔲 Не начато | P1 |
-| Мониторинг | 🔲 Не начато | P1 |
-| Автообновление | 🔲 Не начато | P1 |
-| Web UI | 🔲 Идея | P2 |
-| Multi-server | 🔲 Идея | P2 |
-| Статистика | 🔲 Идея | P2 |
+| Функция | Статус | Приоритет | Дублирует hcore? |
+|---------|--------|-----------|------------------|
+| Установка | ✅ Готово | P0 | Нет |
+| Update/Upgrade | ✅ Готово | P0 | Нет |
+| Status/Test | ✅ Готово | P0 | Нет |
+| Uninstall | ✅ Готово | P0 | Нет |
+| DNS loop fix | ✅ Готово | P0 | Нет |
+| Safety checks | ✅ Готово | P0 | Нет |
+| Замена подписки | 🔲 Не начато | P0 | Нет |
+| Fallback подписки | 🔲 Не начато | P0 | Нет |
+| CLI wrapper | 🔲 Частично | P0 | Нет |
+| direct-on/off | 🔲 Не начато | P1 | Нет |
+| Мониторинг | 🔲 Не начато | P1 | Нет |
+| Автообновление | 🔲 Не начато | P1 | Нет |
+| Multi-server | 🔲 Идея | P2 | Нет |
+| Статистика | 🔲 Идея | P2 | Нет |
+| Web UI | ❌ НЕ ДЕЛАЕМ | — | Уже есть в hcore |

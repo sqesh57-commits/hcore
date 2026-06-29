@@ -698,6 +698,34 @@ cmd_install() {
   # allow hiddify-svc to bind low ports if needed (cap)
   setcap 'cap_net_bind_service=+ep' "${INSTALL_DIR}/${BINARY_NAME}" 2>/dev/null || true
 
+  section "Cleaning stale proxy state"
+  # Kill any running hiddify-core processes (may be from previous install)
+  pkill -f "hiddify-core" 2>/dev/null || true
+
+  # Remove HIDDIFY chain regardless of which service created it
+  while iptables -t nat -D OUTPUT -p tcp -j HIDDIFY 2>/dev/null; do :; done
+  while iptables -t nat -D OUTPUT -p udp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null; do :; done
+  while iptables -t nat -D OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null; do :; done
+  iptables -t nat -F HIDDIFY 2>/dev/null || true
+  iptables -t nat -X HIDDIFY 2>/dev/null || true
+
+  # Same for IPv6
+  while ip6tables -t nat -D OUTPUT -p tcp -j HIDDIFY 2>/dev/null; do :; done
+  while ip6tables -t nat -D OUTPUT -p udp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null; do :; done
+  while ip6tables -t nat -D OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null; do :; done
+  ip6tables -t nat -F HIDDIFY 2>/dev/null || true
+  ip6tables -t nat -X HIDDIFY 2>/dev/null || true
+
+  # Stop any existing hcore/hiddify services
+  systemctl stop hcore 2>/dev/null || true
+  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+  systemctl stop "${SERVICE_NAME}-iptables" 2>/dev/null || true
+
+  # Unset proxy env to ensure direct connection for config generation
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY 2>/dev/null || true
+
+  ok "Stale proxy state cleaned"
+
   section "Generating and patching config"
   echo "$SUBSCRIPTION_URL" > "$(sub_url_file)"
   chown root:"$HIDDIFY_USER" "$(sub_url_file)"

@@ -412,7 +412,11 @@ iptables_add() {
   # apply to outgoing traffic
   iptables -t nat -A OUTPUT -p tcp -j HIDDIFY
 
-  # DNS redirect
+  # DNS redirect — bypass for hiddify-svc to prevent DNS loop
+  [[ -n "$uid" ]] && \
+    iptables -t nat -A OUTPUT -p udp --dport 53 -m owner --uid-owner "$uid" -j RETURN
+  [[ -n "$uid" ]] && \
+    iptables -t nat -A OUTPUT -p tcp --dport 53 -m owner --uid-owner "$uid" -j RETURN
   iptables -t nat -A OUTPUT -p udp --dport 53 -j REDIRECT --to-ports "$PORT_DNS"
   iptables -t nat -A OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports "$PORT_DNS"
 
@@ -426,6 +430,10 @@ iptables_add() {
       ip6tables -t nat -A HIDDIFY -m owner --uid-owner "$uid" -j RETURN
     ip6tables -t nat -A HIDDIFY -p tcp -j REDIRECT --to-ports "$PORT_REDIR"
     ip6tables -t nat -A OUTPUT  -p tcp -j HIDDIFY
+    [[ -n "$uid" ]] && \
+      ip6tables -t nat -A OUTPUT -p udp --dport 53 -m owner --uid-owner "$uid" -j RETURN
+    [[ -n "$uid" ]] && \
+      ip6tables -t nat -A OUTPUT -p tcp --dport 53 -m owner --uid-owner "$uid" -j RETURN
     ip6tables -t nat -A OUTPUT  -p udp --dport 53 -j REDIRECT --to-ports "$PORT_DNS"
     ip6tables -t nat -A OUTPUT  -p tcp --dport 53 -j REDIRECT --to-ports "$PORT_DNS"
     ok "IPv6 iptables rules added"
@@ -440,12 +448,18 @@ iptables_del() {
   info "Removing iptables rules..."
 
   while iptables -t nat -D OUTPUT -p tcp -j HIDDIFY 2>/dev/null; do :; done
+  local uid
+  uid=$(id -u "$HIDDIFY_USER" 2>/dev/null || echo "")
+  while iptables -t nat -D OUTPUT -p udp --dport 53 -m owner --uid-owner "$uid" -j RETURN 2>/dev/null; do :; done
+  while iptables -t nat -D OUTPUT -p tcp --dport 53 -m owner --uid-owner "$uid" -j RETURN 2>/dev/null; do :; done
   while iptables -t nat -D OUTPUT -p udp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null; do :; done
   while iptables -t nat -D OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null; do :; done
   iptables -t nat -F HIDDIFY 2>/dev/null || true
   iptables -t nat -X HIDDIFY 2>/dev/null || true
 
   while ip6tables -t nat -D OUTPUT -p tcp -j HIDDIFY 2>/dev/null; do :; done
+  while ip6tables -t nat -D OUTPUT -p udp --dport 53 -m owner --uid-owner "$uid" -j RETURN 2>/dev/null; do :; done
+  while ip6tables -t nat -D OUTPUT -p tcp --dport 53 -m owner --uid-owner "$uid" -j RETURN 2>/dev/null; do :; done
   while ip6tables -t nat -D OUTPUT -p udp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null; do :; done
   while ip6tables -t nat -D OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports "$PORT_DNS" 2>/dev/null; do :; done
   ip6tables -t nat -F HIDDIFY 2>/dev/null || true
@@ -544,6 +558,8 @@ add() {
   [ -n "\$uid" ] && iptables -t nat -A HIDDIFY -m owner --uid-owner "\$uid" -j RETURN
   iptables -t nat -A HIDDIFY -p tcp -j REDIRECT --to-ports "\$PORT_REDIR"
   iptables -t nat -A OUTPUT  -p tcp -j HIDDIFY
+  [ -n "\$uid" ] && iptables -t nat -A OUTPUT -p udp --dport 53 -m owner --uid-owner "\$uid" -j RETURN
+  [ -n "\$uid" ] && iptables -t nat -A OUTPUT -p tcp --dport 53 -m owner --uid-owner "\$uid" -j RETURN
   iptables -t nat -A OUTPUT  -p udp --dport 53 -j REDIRECT --to-ports "\$PORT_DNS"
   iptables -t nat -A OUTPUT  -p tcp --dport 53 -j REDIRECT --to-ports "\$PORT_DNS"
 
@@ -556,6 +572,8 @@ add() {
     [ -n "\$uid" ] && ip6tables -t nat -A HIDDIFY -m owner --uid-owner "\$uid" -j RETURN
     ip6tables -t nat -A HIDDIFY -p tcp -j REDIRECT --to-ports "\$PORT_REDIR"
     ip6tables -t nat -A OUTPUT  -p tcp -j HIDDIFY
+    [ -n "\$uid" ] && ip6tables -t nat -A OUTPUT -p udp --dport 53 -m owner --uid-owner "\$uid" -j RETURN
+    [ -n "\$uid" ] && ip6tables -t nat -A OUTPUT -p tcp --dport 53 -m owner --uid-owner "\$uid" -j RETURN
     ip6tables -t nat -A OUTPUT  -p udp --dport 53 -j REDIRECT --to-ports "\$PORT_DNS"
     ip6tables -t nat -A OUTPUT  -p tcp --dport 53 -j REDIRECT --to-ports "\$PORT_DNS"
   fi
@@ -563,11 +581,15 @@ add() {
 
 del() {
   iptables  -t nat -D OUTPUT -p tcp -j HIDDIFY 2>/dev/null || true
+  while iptables  -t nat -D OUTPUT -p udp --dport 53 -m owner --uid-owner "\$uid" -j RETURN 2>/dev/null; do :; done
+  while iptables  -t nat -D OUTPUT -p tcp --dport 53 -m owner --uid-owner "\$uid" -j RETURN 2>/dev/null; do :; done
   iptables  -t nat -D OUTPUT -p udp --dport 53 -j REDIRECT --to-ports "\$PORT_DNS" 2>/dev/null || true
   iptables  -t nat -D OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports "\$PORT_DNS" 2>/dev/null || true
   iptables  -t nat -F HIDDIFY 2>/dev/null || true
   iptables  -t nat -X HIDDIFY 2>/dev/null || true
   ip6tables -t nat -D OUTPUT -p tcp -j HIDDIFY 2>/dev/null || true
+  while ip6tables -t nat -D OUTPUT -p udp --dport 53 -m owner --uid-owner "\$uid" -j RETURN 2>/dev/null; do :; done
+  while ip6tables -t nat -D OUTPUT -p tcp --dport 53 -m owner --uid-owner "\$uid" -j RETURN 2>/dev/null; do :; done
   ip6tables -t nat -D OUTPUT -p udp --dport 53 -j REDIRECT --to-ports "\$PORT_DNS" 2>/dev/null || true
   ip6tables -t nat -D OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports "\$PORT_DNS" 2>/dev/null || true
   ip6tables -t nat -F HIDDIFY 2>/dev/null || true

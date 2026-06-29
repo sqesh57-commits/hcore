@@ -671,6 +671,44 @@ sub_test_url() {
   curl -fsSL --max-time 15 --noproxy '*' "$url" >/dev/null 2>&1
 }
 
+# Mask URL for safe display — works on all platforms
+mask_url() {
+  local url="$1"
+  # Simple approach: split by /, keep first 3 segments, mask 4th, skip rest
+  local result="" seg="" i=0
+  IFS='/' read -ra parts <<< "$url"
+  for seg in "${parts[@]}"; do
+    i=$((i + 1))
+    if [[ $i -le 3 ]]; then
+      if [[ -n "$result" ]]; then
+        result="${result}/${seg}"
+      else
+        result="${seg}"
+      fi
+    elif [[ $i -eq 4 ]]; then
+      result="${result}/${seg:0:4}****"
+      break
+    fi
+  done
+  # If fewer than 4 segments, just mask the last one
+  if [[ $i -lt 4 && ${#parts[@]} -gt 0 ]]; then
+    local last="${parts[$((${#parts[@]} - 1))]}"
+    result="${result}/${last:0:4}****"
+  fi
+  # Mask secret= parameter
+  result=$(echo "$result" | sed 's|\(secret=\)[^&]*|\1****|g' 2>/dev/null || echo "$result")
+  echo "$result"
+}
+
+count_lines() {
+  local file="$1"
+  if [[ -f "$file" ]] && [[ -s "$file" ]]; then
+    wc -l < "$file" | tr -d ' '
+  else
+    echo 0
+  fi
+}
+
 sub_validate_url() {
   local url="$1"
   [[ -n "$url" ]] || die "Subscription URL cannot be empty"
@@ -813,7 +851,7 @@ SUBEOF
       if [[ -f "$(sub_url_file)" ]]; then
         local sub_url sub_display
         sub_url=$(cat "$(sub_url_file)")
-        sub_display=$(echo "$sub_url" | sed -E 's|(/[^/]{4})[^/]*(/\?|$)|\1****\2|; s|(\?secret=)[^&]*|\1****|')
+        sub_display=$(mask_url "$sub_url")
         echo -e "  URL: ${CYAN}${sub_display}${NC}"
         if sub_test_url "$sub_url"; then
           echo -e "  Status: ${GREEN}reachable${NC}"
@@ -839,7 +877,7 @@ SUBEOF
         warn "No subscription configured"
       fi
       local fb_count
-      fb_count=$(fallback_list | grep -c . || echo 0)
+      fb_count=$(count_lines "$(sub_fallback_file)")
       if [[ "$fb_count" -gt 0 ]]; then
         info "Testing $fb_count fallback URL(s)..."
         local i=0
@@ -859,17 +897,17 @@ SUBEOF
       if [[ -f "$(sub_url_file)" ]]; then
         local sub_url sub_display
         sub_url=$(cat "$(sub_url_file)")
-        sub_display=$(echo "$sub_url" | sed -E 's|(/[^/]{4})[^/]*(/\?|$)|\1****\2|; s|(\?secret=)[^&]*|\1****|')
+        sub_display=$(mask_url "$sub_url")
         echo -e "  ${BOLD}Primary:${NC} ${CYAN}${sub_display}${NC}"
       fi
       local fb_count
-      fb_count=$(fallback_list | grep -c . || echo 0)
+      fb_count=$(count_lines "$(sub_fallback_file)")
       if [[ "$fb_count" -gt 0 ]]; then
         local i=0
         while IFS= read -r fb; do
           i=$((i + 1))
           local fb_display
-          fb_display=$(echo "$fb" | sed -E 's|(/[^/]{4})[^/]*(/\?|$)|\1****\2|; s|(\?secret=)[^&]*|\1****|')
+          fb_display=$(mask_url "$fb")
           echo -e "  ${BOLD}Fallback #$i:${NC} ${CYAN}${fb_display}${NC}"
         done < <(fallback_list)
       else
@@ -1676,7 +1714,7 @@ cmd_status() {
     local sub_url sub_display
     sub_url=$(cat "$(sub_url_file)")
     # Mask the secret part of URL for security
-    sub_display=$(echo "$sub_url" | sed -E 's|(/[^/]{4})[^/]*(/\?|$)|\1****\2|; s|(\?secret=)[^&]*|\1****|')
+    sub_display=$(mask_url "$sub_url")
     echo -e "  URL: ${CYAN}${sub_display}${NC}"
     # Check if config is fresh (modified within last 24h)
     if [[ -f "$(config_file)" ]]; then
@@ -1694,7 +1732,7 @@ cmd_status() {
     echo -e "  ${YELLOW}No subscription configured${NC}"
   fi
   local fb_count
-  fb_count=$(fallback_list | grep -c . || echo 0)
+  fb_count=$(count_lines "$(sub_fallback_file)")
   if [[ "$fb_count" -gt 0 ]]; then
     echo -e "  Fallback URLs: ${CYAN}${fb_count}${NC}"
   fi

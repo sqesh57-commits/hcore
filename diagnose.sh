@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # hcore diagnostic script — safe subscription testing without proxy setup
+# Usage: sudo bash diagnose.sh --url <subscription-url>
 # =============================================================================
 set -euo pipefail
 
@@ -15,6 +16,27 @@ section() { echo -e "\n${BOLD}=== $* ===${NC}"; }
 INSTALL_DIR="/opt/hiddify"
 BINARY_NAME="hiddify-core"
 HIDDIFY_USER="hiddify-svc"
+SUB_URL=""
+
+# --- Parse args ---
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --url) SUB_URL="$2"; shift 2 ;;
+    *) die "Unknown option: $1. Usage: sudo bash $0 --url <subscription-url>" ;;
+  esac
+done
+
+# Fallback to saved URL
+if [[ -z "$SUB_URL" && -f "${INSTALL_DIR}/subscription.url" ]]; then
+  SUB_URL=$(cat "${INSTALL_DIR}/subscription.url")
+  info "Using saved subscription URL"
+fi
+
+[[ -n "$SUB_URL" ]] || die "No URL provided. Usage: sudo bash $0 --url <subscription-url>"
+
+# --- Ensure directories exist ---
+mkdir -p "${INSTALL_DIR}/data" 2>/dev/null || true
+chown -R "$HIDDIFY_USER":"$HIDDIFY_USER" "${INSTALL_DIR}" 2>/dev/null || true
 
 # --- Step 1: Check current state ---
 section "1. Current state"
@@ -41,28 +63,41 @@ fi
 # --- Step 2: Test subscription URL ---
 section "2. Subscription URL test"
 
-if [[ -f "${INSTALL_DIR}/subscription.url" ]]; then
-  SUB_URL=$(cat "${INSTALL_DIR}/subscription.url")
-  info "Testing URL: ${SUB_URL:0:50}..."
+info "Testing URL: ${SUB_URL:0:60}..."
 
-  if curl -fsSL --max-time 10 "$SUB_URL" >/dev/null 2>&1; then
-    ok "URL is reachable"
-  else
-    die "URL is not reachable: $SUB_URL"
-  fi
-
-  CONTENT_TYPE=$(curl -fsSI --max-time 10 "$SUB_URL" 2>/dev/null | grep -i content-type | head -1 || true)
-  info "Content-Type: ${CONTENT_TYPE:-unknown}"
+if curl -fsSL --max-time 10 "$SUB_URL" >/dev/null 2>&1; then
+  ok "URL is reachable"
 else
-  die "No subscription URL found"
+  die "URL is not reachable: $SUB_URL"
 fi
 
-# --- Step 3: Generate config manually ---
-section "3. Manual config generation"
+CONTENT_TYPE=$(curl -fsSI --max-time 10 "$SUB_URL" 2>/dev/null | grep -i content-type | head -1 || true)
+info "Content-Type: ${CONTENT_TYPE:-unknown}"
 
-if [[ ! -x "${INSTALL_DIR}/${BINARY_NAME}" ]]; then
-  die "Binary not found: ${INSTALL_DIR}/${BINARY_NAME}"
+# Show first 200 chars of response to verify it's valid config
+RESPONSE=$(curl -fsSL --max-time 10 "$SUB_URL" 2>/dev/null | head -c 500 || true)
+if echo "$RESPONSE" | grep -q '{'; then
+  ok "Response looks like JSON config"
+else
+  warn "Response doesn't look like JSON — first 200 chars:"
+  echo "$RESPONSE" | head -c 200 | sed 's/^/    /'
 fi
+
+# --- Step 3: Check binary ---
+section "3. Binary check"
+
+if [[ -x "${INSTALL_DIR}/${BINARY_NAME}" ]]; then
+  ok "Binary found: ${INSTALL_DIR}/${BINARY_NAME}"
+  "${INSTALL_DIR}/${BINARY_NAME}" version 2>/dev/null | sed 's/^/    /' || true
+else
+  die "Binary not found: ${INSTALL_DIR}/${BINARY_NAME}
+
+  Install hcore first:
+    sudo ./install.sh install --subscription-url \"$SUB_URL\""
+fi
+
+# --- Step 4: Generate config manually ---
+section "4. Manual config generation"
 
 BACKUP_DIR="${INSTALL_DIR}/backup-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$BACKUP_DIR"
@@ -99,14 +134,13 @@ for o in d.get('outbounds', []):
 print('  outbound types:', dict(types))
 " 2>/dev/null || warn "Could not parse config"
 else
-  die "Config generation failed — no current-config.json"
-
-  section "Last 20 lines of log"
-  tail -20 "${INSTALL_DIR}/hiddify-core.log" | sed 's/^/    /'
+  section "Config generation FAILED — last 20 lines of log"
+  tail -20 "${INSTALL_DIR}/hiddify-core.log" 2>/dev/null | sed 's/^/    /'
+  die "No current-config.json generated"
 fi
 
-# --- Step 4: Patch config ---
-section "4. Patch config"
+# --- Step 5: Patch config ---
+section "5. Patch config"
 
 PATCH_SCRIPT=$(mktemp)
 cat > "$PATCH_SCRIPT" << 'PYEOF'
@@ -179,8 +213,8 @@ else
   die "Failed to create fixed config"
 fi
 
-# --- Step 5: Test config ---
-section "5. Test config (dry run)"
+# --- Step 6: Test config ---
+section "6. Test config (dry run)"
 
 info "Running: hiddify-core srun -c fixed-config (will timeout after 5s)"
 timeout 5 sudo -u "$HIDDIFY_USER" \
